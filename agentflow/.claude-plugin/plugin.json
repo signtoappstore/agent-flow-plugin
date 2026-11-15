@@ -6,10 +6,10 @@
     "name": "Wem",
     "email": "huynh.developer@gmail.com"
   },
-  "homepage": "https://github.com/wem2017/agent-flow-plugin",
-  "repository": "https://github.com/wem2017/agent-flow-plugin",
+  "homepage": "https://github.com/signtoappstore/agent-flow-plugin",
+  "repository": "https://github.com/signtoappstore/agent-flow-plugin",
   "license": "MIT",
-  "privacyPolicyUrl": "https://github.com/wem2017/agent-flow-plugin/blob/master/agentflow/PRIVACY.md",
+  "privacyPolicyUrl": "https://github.com/signtoappstore/agent-flow-plugin/blob/master/agentflow/PRIVACY.md",
   "defaultEnabled": false,
   "keywords": [
     "workflow",

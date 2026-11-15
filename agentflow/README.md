@@ -80,7 +80,7 @@ Script của plugin (`agentflow-board`, `agentflow-notify`, helper của GitHub 
 ## Cài đặt
 
 ```bash
-claude plugin marketplace add wem2017/agent-flow-plugin     # phát triển plugin: thay bằng đường dẫn tới bản clone
+claude plugin marketplace add signtoappstore/agent-flow-plugin     # phát triển plugin: thay bằng đường dẫn tới bản clone
 cd <repo của bạn>
 claude plugin install agentflow@agent-flow-plugins --scope local
 claude plugin enable  agentflow@agent-flow-plugins --scope local

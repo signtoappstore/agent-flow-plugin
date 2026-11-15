@@ -41,4 +41,4 @@ Sửa guard hoặc script → thêm case cho mỗi lỗ hổng/chặn nhầm v�
 
 ## Phân phối cho team
 
-`master` có branch protection chặn force-push và xoá nhánh. Mỗi release `claude plugin tag ./agentflow --push` (tạo tag `agentflow--v<version>`). Teammate: `claude plugin marketplace add wem2017/agent-flow-plugin` một lần, sau đó `marketplace update` + `plugin update` + restart. Máy không giữ source thì `/agentflow:learn` dừng và đề nghị gửi bài học qua issue/PR.
+`master` có branch protection chặn force-push và xoá nhánh. Mỗi release `claude plugin tag ./agentflow --push` (tạo tag `agentflow--v<version>`). Teammate: `claude plugin marketplace add signtoappstore/agent-flow-plugin` một lần, sau đó `marketplace update` + `plugin update` + restart. Máy không giữ source thì `/agentflow:learn` dừng và đề nghị gửi bài học qua issue/PR.

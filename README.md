@@ -3,7 +3,7 @@
 Marketplace Claude Code chứa plugin [AgentFlow](agentflow/README.md): team agent PO · SA · DEV (kiêm automation test trên staging) tự chạy ticket trên GitHub Projects board tới cổng của con người.
 
 ```bash
-claude plugin marketplace add wem2017/agent-flow-plugin
+claude plugin marketplace add signtoappstore/agent-flow-plugin
 cd <repo của bạn>
 claude plugin install agentflow@agent-flow-plugins --scope local
 claude plugin enable  agentflow@agent-flow-plugins --scope local
