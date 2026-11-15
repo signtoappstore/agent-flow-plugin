@@ -367,6 +367,187 @@ class McpHeaders(RepoCase):
             self.assertIn(name, toolsets)
 
 
+E2E_CONFIG = """schema: 5
+surfaces:
+  backend:
+    path: "backend/"
+  web:
+    path: "web/"
+    platform: "Web"
+    e2e_dir: ".maestro"
+  mobile:
+    path: "mobile/"
+    platform: "Mobile"
+    e2e_dir: ".maestro"
+    install: "flutter build apk"
+e2e_map:
+  "backend/services/billing/**": [pay]
+run:
+  max_regression: 3
+"""
+FAKE_MAESTRO = """#!/bin/sh
+for a; do f=$a; done
+sleep 0.3
+case "$f" in *bad*) echo 'Assert that "Done" is visible... FAILED'; exit 1;; esac
+echo ok
+"""
+
+
+class E2E(RepoCase):
+    """agentflow-e2e: which existing flows a change re-runs (and why), and detached runs awaited in short steps."""
+
+    def setUp(self):
+        super().setUp()
+        self.out = tempfile.TemporaryDirectory()
+        self.addCleanup(self.out.cleanup)
+        self.env = {"AGENTFLOW_E2E_TMP": self.out.name}
+        files = {
+            "agentflow.yaml": E2E_CONFIG,
+            "web/.maestro/af-42-tc1-new.yaml": "url: x\ntags: [af-42]\n---\n- tapOn:\n    id: settings-language\n",
+            "web/.maestro/settings.yaml": "url: x\ntags: [account]\n---\n- tapOn:\n    id: settings-language\n",
+            "web/.maestro/inbox.yaml": "url: x\ntags:\n  - account\n---\n- runScript:\n    file: scripts/inbox.js\n",
+            "web/.maestro/scripts/inbox.js": "var r = http.get(api + '/notification/private/inbox')\n",
+            "web/.maestro/pay.yaml": "url: x\ntags: [pay]\n---\n- launchApp\n",
+            "web/.maestro/shared/sign-in.yaml": "url: x\n---\n- tapOn:\n    id: auth-submit\n",
+            "mobile/.maestro/settings.yaml": "appId: x\ntags: [account]\n---\n- tapOn:\n    id: settings-language\n",
+            "mobile/.maestro/pay.yaml": "appId: x\ntags: [pay]\n---\n- launchApp\n",
+            "web/src/settings.tsx": "export const A = 1\n",
+            "web/src/auth.tsx": "export const B = 1\n",
+            "backend/services/notification/src/inbox.ts": "export const C = 1\n",
+            "backend/services/billing/src/pay.ts": "export const D = 1\n",
+        }
+        for n in range(5):  # a subflow most flows use says nothing about which flow a change hits
+            files["web/.maestro/home-%d.yaml" % n] = "url: x\n---\n- runFlow: shared/sign-in.yaml\n"
+        for rel, text in files.items():
+            self.write(rel, text)
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "base")
+        self.git("switch", "-q", "-c", "feat")
+
+    git = Style.git
+    write = Style.write
+
+    def select(self, *args):
+        res = tool("agentflow-e2e", "select", *args, cwd=self.repo, env=self.env)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        return json.loads(res.stdout)
+
+    def change(self, rel, text):
+        self.write(rel, text)
+        self.git("commit", "-q", "-am", "change")
+
+    def flows(self, out):
+        return {r["flow"]: r["why"] for r in out["regression"]}
+
+    def test_ticket_flows_apart_and_id_hits_only_its_own_surface(self):
+        self.change("web/src/settings.tsx", "export const A = <b data-testid='settings-language' />\n")
+        out = self.select("--diff", "master...feat", "--issue", "42")
+        self.assertEqual(out["ticket"], ["web/.maestro/af-42-tc1-new.yaml"])
+        self.assertEqual(out["client"], ["web"])
+        self.assertIsNone(out["only"])
+        self.assertEqual(self.flows(out), {"web/.maestro/settings.yaml": ["id:settings-language←web/src/settings.tsx"]})
+
+    def test_backend_only_diff_keeps_regression_on_web(self):
+        self.change("backend/services/billing/src/pay.ts", "export const D = 2\n")
+        self.change("backend/services/notification/src/inbox.ts", "export const C = 2\n")
+        out = self.select("--diff", "master...feat")
+        self.assertEqual((out["client"], out["only"]), ([], "web"))
+        self.assertEqual(self.flows(out), {
+            "web/.maestro/pay.yaml": ["map:pay←backend/services/billing/**"],
+            "web/.maestro/inbox.yaml": ["api:/notification←backend/services/notification/src/inbox.ts"]})
+
+    def test_common_subflow_is_not_evidence(self):
+        self.change("web/src/auth.tsx", "export const B = <b data-testid='auth-submit' />\n")
+        self.assertEqual(self.select("--diff", "master...feat")["regression"], [])
+
+    def test_cap_moves_the_rest_to_over(self):
+        out = self.select("--paths", "backend/services/billing/src/pay.ts", "backend/services/notification/src/x.ts", "--max", "1")
+        self.assertEqual(len(out["regression"]), 1)
+        self.assertEqual(out["regression"][0]["flow"], "web/.maestro/pay.yaml")  # map ranks above api
+        self.assertEqual(out["over"], ["web/.maestro/inbox.yaml"])
+
+    def test_paths_read_at_a_ref_not_the_working_tree(self):
+        self.write("web/src/settings.tsx", "export const A = <b data-testid='settings-language' />\n")  # not committed
+        self.assertEqual(self.select("--paths", "web/src/settings.tsx", "--ref", "master")["regression"], [])
+        self.assertEqual(len(self.select("--paths", "web/src/settings.tsx", "--issue", "42")["regression"]), 1)
+
+    def test_changed_flow_reruns(self):
+        self.change("web/.maestro/settings.yaml", "url: x\ntags: [account]\n---\n- tapOn:\n    id: other\n")
+        self.assertIn("changed:flow đổi trong diff", self.flows(self.select("--diff", "master...feat"))["web/.maestro/settings.yaml"])
+
+    def run_flows(self, *flows, extra=(), name="web"):
+        fake = os.path.join(self.out.name, "bin")
+        os.makedirs(fake, exist_ok=True)
+        with open(os.path.join(fake, "maestro"), "w") as fh:
+            fh.write(FAKE_MAESTRO)
+        os.chmod(os.path.join(fake, "maestro"), 0o755)
+        env = dict(self.env, PATH=fake + ":/usr/bin:/bin")
+        res = tool("agentflow-e2e", "run", "--issue", "42", "--dir", os.path.join(self.repo, "web"), "--name", name, *extra, *flows,
+                   cwd=self.repo, env=env)
+        return res, env
+
+    def wait(self, env, *args):
+        res = tool("agentflow-e2e", "wait", *args, cwd=self.repo, env=env)
+        return res.returncode, json.loads(res.stdout)
+
+    def test_run_is_detached_and_wait_reports_failures_without_secrets(self):
+        self.write("web/.maestro/af-42-tc2-bad.yaml", "url: x\n---\n")
+        secret = os.path.join(self.out.name, "e2e.env")
+        with open(secret, "w") as fh:
+            fh.write('export E2E_PASSWORD="s3cret"\n# note\n')
+        res, env = self.run_flows(".maestro/af-42-tc1-new.yaml", ".maestro/af-42-tc2-bad.yaml",
+                                  extra=("--repeat", "2", "--env-file", secret, "-e", "TOKEN_X=t0k"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout)["total"], 4)
+        code, out = self.wait(env, "--issue", "42", "--max", "0.1")
+        self.assertEqual((code, out["done"]), (2, False))
+        code, out = self.wait(env, "--issue", "42", "--max", "30")
+        self.assertEqual((code, out["done"]), (1, True))
+        run = out["runs"][0]
+        self.assertEqual((run["done"], run["total"]), (4, 4))
+        self.assertEqual([(f["flow"], f["rep"]) for f in run["failed"]], [(".maestro/af-42-tc2-bad.yaml", 1), (".maestro/af-42-tc2-bad.yaml", 2)])
+        self.assertIn("FAILED", run["failed"][0]["step"])
+        folder = os.path.join(self.out.name, "af-42-e2e", "web")
+        for name in os.listdir(folder):
+            if name.endswith(".json"):
+                with open(os.path.join(folder, name)) as fh:
+                    text = fh.read()
+                self.assertNotIn("s3cret", text)
+                self.assertNotIn("t0k", text)
+
+    def test_green_run_and_missing_flow(self):
+        res, env = self.run_flows(".maestro/af-42-tc1-new.yaml")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.wait(env, "--issue", "42", "--max", "30")[0], 0)
+        res, _ = self.run_flows(".maestro/nope.yaml")
+        self.assertEqual(res.returncode, 3)
+        self.assertEqual(json.loads(res.stdout)["missing"], [".maestro/nope.yaml"])
+        self.assertEqual(self.wait(env, "--issue", "7", "--max", "0.1")[0], 3)
+
+    def test_reset_drops_runs_of_an_earlier_turn(self):
+        self.write("web/.maestro/af-42-tc2-bad.yaml", "url: x\n---\n")
+        _, env = self.run_flows(".maestro/af-42-tc2-bad.yaml", name="mobile")  # an earlier turn, failed
+        self.assertEqual(self.wait(env, "--issue", "42", "--max", "30")[0], 1)
+        self.run_flows(".maestro/af-42-tc1-new.yaml")
+        code, out = self.wait(env, "--issue", "42", "--max", "30")
+        self.assertEqual((code, sorted(r["name"] for r in out["runs"])), (1, ["mobile", "web"]))  # without --reset it still counts
+        self.run_flows(".maestro/af-42-tc1-new.yaml", extra=("--reset",))
+        code, out = self.wait(env, "--issue", "42", "--max", "30")
+        self.assertEqual((code, [r["name"] for r in out["runs"]]), (0, ["web"]))
+
+    def test_wait_log_until_exit_line(self):
+        log = os.path.join(self.out.name, "build.log")
+        with open(log, "w") as fh:
+            fh.write("building\n")
+        code, out = self.wait(self.env, "--log", log, "--max", "0.1")
+        self.assertEqual((code, out["done"]), (2, False))
+        with open(log, "a") as fh:
+            fh.write("error: x\nexit 1\n")
+        code, out = self.wait(self.env, "--log", log, "--max", "5")
+        self.assertEqual((code, out["exit"]), (1, 1))
+        self.assertIn("error: x", out["tail"])
+
+
 class ResultCheck(unittest.TestCase):
     def check(self, message, agent="agentflow:dev", active=False):
         payload = {"agent_type": agent, "last_assistant_message": message, "stop_hook_active": active}
@@ -375,7 +556,7 @@ class ResultCheck(unittest.TestCase):
         return res.stdout.strip()
 
     def test_valid(self):
-        for message in ("Xong.\n\nRESULT: in_review · ok\nPR: #5 @abc\nNOTE: x", "RESULT: ready · needs_info", "RESULT: in_qc · waiting_human", "RESULT: in_qc · blocked", "RESULT: in_progress · escalated", "RESULT: in_review · abort"):
+        for message in ("Xong.\n\nRESULT: in_review · ok\nPR: #5 @abc\nNOTE: x", "RESULT: ready · needs_info", "RESULT: in_qc · waiting_human", "RESULT: in_progress · verify", "RESULT: in_qc · blocked", "RESULT: in_progress · escalated", "RESULT: in_review · abort"):
             with self.subTest(message):
                 self.assertEqual(self.check(message), "")
 

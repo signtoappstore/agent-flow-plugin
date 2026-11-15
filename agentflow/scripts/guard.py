@@ -60,7 +60,7 @@ CODE_FLAG = re.compile(r"^(-[a-zA-Z]*[ceEpr]|--eval|--print|--command)$")
 PATH_SAFE = {"ls", "stat", "test", "[", "[[", "touch", "rm", "mkdir", "chmod", "chown", "echo", "printf", "print", "source",
              ".", "for", "case", "select", "cd", "pushd", "popd", "export", "unset", "which", "type", "du", "realpath",
              "dirname", "basename", "true", "false", "find", "fd", "agentflow-settings", "agentflow-board", "agentflow-journal",
-             "agentflow-notify", "flutter", "dart", "dotenv", "dotenvx", "env-cmd", "docker", "docker-compose", "podman",
+             "agentflow-notify", "agentflow-e2e", "flutter", "dart", "dotenv", "dotenvx", "env-cmd", "docker", "docker-compose", "podman",
              "pnpm", "npm", "yarn", "npx", "make", "just", "task", "tree", "eslint", "prettier"}
 PATTERN_FIRST = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "jq", "yq", "sed", "gsed", "awk", "gawk"}
 PATTERN_FLAGS = ("-e", "--regexp", "-f", "--file")

@@ -6,19 +6,20 @@ Plugin Claude Code biến một repo GitHub thành **team agent có kỷ luật*
 |---|---|---|
 | **PO** | `/agentflow:task`, ngay trong session của bạn (không subagent) | Expert PO cố vấn bạn viết ticket: vấn đề, bối cảnh, giá trị, người dùng, kết quả đo được, phạm vi, tiêu chí nghiệm thu kiểm được. Không code, không giải pháp kỹ thuật trong ticket |
 | **SA** (Opus) | subagent, ở Ready rồi In Review | Phân tích yêu cầu, chặn ticket chưa đủ, chọn giải pháp tốt nhất và hợp tech stack của repo, **đánh giá rủi ro, lập test case cần kiểm chứng**; sau đó review PR theo thiết kế khi flow đã pass trên staging |
-| **DEV** (Opus) | subagent, ở In Progress | Expert software engineer kiêm automation tester: code theo thiết kế của SA (kiến trúc, SOLID, pattern, clean code), gắn element id, viết flow automation (Maestro trước, **không viết unit/mock test**), merge lên staging, chờ deploy server/web (không chờ release mobile), chạy flow liên quan, tự sửa tối đa 3 vòng; vẫn fail thì ghi lỗi block lên ticket |
+| **DEV** (Opus) | subagent, ở In Progress | Expert software engineer kiêm automation tester: code theo thiết kế của SA (kiến trúc, SOLID, pattern, clean code), gắn element id, viết flow automation (Maestro trước, **không viết unit/mock test**), merge lên staging; lượt **verify** (context mới) chờ deploy server/web (không chờ release mobile), chạy flow của ticket + danh sách Regression SA chốt, tự sửa tối đa 3 vòng; vẫn fail thì ghi lỗi block lên ticket |
 
 Agent tự chạy ticket trên GitHub Projects board **tới cổng của con người**. Bạn chỉ làm ba việc: **chốt việc** (PO kéo Backlog → Ready, hoặc xác nhận ngay trong `/agentflow:task`), **QC tay** khi cần, và **merge**.
 
 - **Một plugin, nhiều repo** — tên cột, label, nhánh, lệnh check của từng repo nằm trong `agentflow.yaml`; plugin chỉ giữ ngữ nghĩa.
-- **Tối ưu token** — lệnh chỉ load khi gọi, mỗi ticket một subagent (session chính chỉ giữ 3 dòng kết quả), thiết kế của SA để DEV khỏi dò code lại và để SA review nhanh theo chính thiết kế đó, không có QC agent (DEV vốn đã build app và biết UI nên tự viết + chạy flow trong cùng một lượt), chỉ chạy flow liên quan, xem ảnh khi fail, review lặp lại chỉ soát diff mới, chờ pipeline theo nhịp giữ prompt cache, lệnh check lưu sẵn trong config, output dài vào log.
+- **Tối ưu token** — lệnh chỉ load khi gọi, mỗi ticket một subagent (session chính chỉ giữ 3 dòng kết quả), thiết kế của SA để DEV khỏi dò code lại và để SA review nhanh theo chính thiết kế đó, không có QC agent (DEV vốn đã build app và biết UI nên tự viết + chạy flow trong cùng một lượt), chỉ chạy flow của ticket + danh sách Regression SA chốt (có trần `run.max_regression`; diff chỉ chạm backend thì chỉ trên web), flow mới chạy 1 lần khi sửa và thêm 2 lần ở head cuối, DEV chạy flow trong lượt verify với context mới, lệnh dài chạy tách và chờ từng bước < 180 giây (harness đẩy nền lệnh dài hơn, mỗi lần poll đọc lại cả context), xem ảnh khi fail, review lặp lại chỉ soát diff mới, chờ pipeline theo nhịp giữ prompt cache, lệnh check lưu sẵn trong config, output dài vào log.
 - **Tự học** — agent tự ghi friction vào journal; `/agentflow:learn` chưng cất thành diff nhỏ vào plugin, bạn duyệt rồi mới phát hành.
 
 ## Luồng
 
 ```
 Backlog ─PO (/task)→ Ready ─SA design: giải pháp + rủi ro + test case (+agentflow)─DEV→ In Progress
-   In Progress: code + element id + flow → draft PR → merge staging → chờ deploy server/web → chạy flow liên quan
+   In Progress: code + element id + flow → draft PR → merge staging ─RESULT verify→ DEV verify (context mới):
+                chờ deploy server/web → chạy flow của ticket + Regression của thiết kế
                 fail → sửa (gắn id / sửa code) → deploy lại → chạy lại, tối đa run.max_test_rounds (3) vòng
                 vẫn fail → [AF:DEV] blocked: lỗi block từng TC lên issue, +blocked, đứng nguyên cột
    pass ─→ In Review ─SA review ✅─┬─ PR còn mục QC tay → In QC +qc-manual → QC người tick + kéo card → undraft ─┐
@@ -37,7 +38,14 @@ Review ❌ liên tiếp > 3 hoặc QC người fail > 2 → +blocked + [AF:SYS] 
 
 PR có mục **Kiểm chứng lại**: *QC tay* (chặn merge — case không tự động được) và *Đề xuất kiểm chứng thêm* (regression ở vùng rủi ro SA nêu và phần diff chạm mà flow không phủ — không chặn).
 
-Nhánh staging (`staging.branch`, bắt buộc) chỉ để build test: DEV merge dồn nhánh ticket vào đó (từ worktree tạm, hook kiểm), không reset, không force-push, không merge ngược về PR hay master. Vì vậy trên staging có thể có code chưa đạt của ticket khác; nhánh lệch nhiều thì bạn tự reset. Job release mobile (TestFlight, Firebase…) khai ở `staging.skip_checks` để DEV không chờ; flow mobile chạy trên emulator với bản build trỏ server staging (`surfaces.<key>.install`).
+Nhánh staging (`staging.branch`, bắt buộc) chỉ để build test: DEV merge dồn nhánh ticket vào đó (từ worktree tạm, hook kiểm), không reset, không force-push, không merge ngược về PR hay master. Vì vậy trên staging có thể có code chưa đạt của ticket khác; nhánh lệch nhiều thì bạn tự reset. Job release mobile (TestFlight, Firebase…) khai ở `staging.skip_checks` để DEV không chờ; flow mobile chạy trên emulator với bản build trỏ server staging (`surfaces.<key>.install`), chỉ build lại khi code mobile đổi.
+
+**Flow nào được chạy lại sau khi deploy staging**: flow của ticket (tag `af-<n>`) + mục **Regression** SA ghi trong thiết kế, tối đa `run.max_regression` (mặc định 6). SA lấy gợi ý từ `agentflow-e2e select`, mỗi flow kèm lý do: flow đổi trong diff › `e2e_map` (glob path → tag flow — cách duy nhất chắc chắn cho backend, vì flow UI không chứa path code backend) › path API trong script của flow trùng thư mục bị đổi › element id của flow nằm trong file client bị đổi. Diff chỉ chạm backend ⇒ chỉ flow web. Phần vượt trần vào "Đề xuất kiểm chứng thêm"; cả suite để CI. Ví dụ khai báo trong `agentflow.yaml`:
+
+```yaml
+e2e_map:
+  "backend/services/notification/**": [inbox]     # flow có tags: [inbox] chạy lại khi service notification đổi
+```
 
 Tên cột thật của board được map trong `agentflow.yaml` → `board.status`.
 
@@ -109,6 +117,7 @@ claude plugin enable  agentflow@agent-flow-plugins --scope local
 | `hooks/hooks.json` + `scripts/guard.py` · `shellparse.py` | Hook chặn (best-effort, xem §Chạy không cần bạn), kể cả qua lệnh bọc (`bash -c`, `env`, `timeout`, `$(…)`, `xargs`, `eval`, code Python/Node): merge/approve PR, dispatch workflow, force-push, xoá nhánh remote, xoá repo/package, push nhánh protected/base, đọc/sửa/in path `forbidden`, token trong tham số. Thêm luật theo role: SA chỉ đọc (không sửa file, không push, không đổi git); DEV chỉ ghi trong worktree `af-<n>` và worktree staging `af-<n>-staging`, push staging chỉ từ worktree staging và worktree đó chỉ push vào staging, không đưa staging vào nhánh ticket (merge, reset, restore, push `origin/staging:<nhánh>`), không `update-ref`/`read-tree`/`git branch` ghi, không `pull` ngoài worktree, không undraft |
 | `scripts/result-check.py` | Hook `SubagentStop`: subagent phải kết thúc bằng khối `RESULT` |
 | `bin/agentflow-board` | Setup + chẩn đoán qua GraphQL (Status option, field, view, label, issue type, doctor, metrics) + đọc check pipeline staging + gom góp ý của người trên PR (`feedback`) + milestone mở cho `/agentflow:task` (`milestones`) |
+| `bin/agentflow-e2e` | `select`: flow có sẵn cần chạy lại cho một thay đổi + lý do (SA lúc thiết kế, DEV khi diff lệch thiết kế) · `run`: chạy flow Maestro tách khỏi shell của agent (lặp, nhiều thiết bị, `--env-file` không lộ giá trị) · `wait`: chờ ≤ 160 giây rồi in một dòng JSON (flow fail + bước + log), `--log` cho build chạy tách |
 | `bin/agentflow-journal` · `agentflow-notify` · `agentflow-settings` | Journal tự học (`~/.claude/agentflow/journal.jsonl`) · ping Telegram · sửa settings local và chạy lệnh với `env` của nó, không lộ secret |
 | `scripts/mcp-headers.py` | `headersHelper` cấp token cho GitHub MCP lúc connect |
 | `templates/` | Issue form, PR template, README board |

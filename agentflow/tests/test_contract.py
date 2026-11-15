@@ -18,9 +18,11 @@ import afconfig  # noqa: E402
 # Runtime prompts cost tokens on every run. Limits are characters, since one line can hold hundreds of them.
 # Do not raise a limit to fit a change: remove something first (CONTRIBUTING.md §Quy ước).
 # 3.0 folded the QC agent into DEV: dev.md and automation.md grew, protocol.md and dispatch.md shrank, qc.md is gone.
+# 3.5 (SA regression list, DEV verify spawn, detached runs under the 180 s harness cut) added ~1.4k across five files: a
+# few hundred tokens a spawn against ~20M tokens of late, full-context test turns per ticket (DESIGN-NOTES.md).
 BUDGETS = {
-    "agents/sa.md": 9300, "agents/dev.md": 12000,
-    "references/protocol.md": 12000, "references/dispatch.md": 8200, "references/design.md": 2600, "references/automation.md": 6550,
+    "agents/sa.md": 9500, "agents/dev.md": 12450,
+    "references/protocol.md": 12350, "references/dispatch.md": 8400, "references/design.md": 2600, "references/automation.md": 6800,
     "references/engineering.md": 2850,
     "skills/init/SKILL.md": 10650, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 2400, "skills/doctor/SKILL.md": 2000,
     "skills/run/SKILL.md": 2300, "skills/status/SKILL.md": 2850, "skills/task/SKILL.md": 9400, "skills/init/references/board-setup.md": 4850,
@@ -29,7 +31,7 @@ BUDGETS = {
 # 2.x DEV paid 9.3k + 12.1k + 8.3k (it read the reviewer prompt to self-review); the shared engineering.md replaced that.
 # 3.0 happy path: SA design + DEV + SA review ≈ 24k + 33.4k + 24k, where the QC plan + verify spawns cost 2 × 27.7k more.
 SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"]}
-PER_SPAWN_LIMIT = {"sa": 24150, "dev": 33400}
+PER_SPAWN_LIMIT = {"sa": 24700, "dev": 34400}
 DESCRIPTION_LIMIT = 700
 
 
@@ -238,6 +240,20 @@ class References(unittest.TestCase):
                     with self.subTest("%s: %s" % (rel, flag)):
                         self.assertIn('"%s"' % flag, source)
 
+    def test_e2e_subcommands_and_flags_exist(self):
+        source = read("bin/agentflow-e2e")
+        subs = set(re.findall(r'add_parser\("([\w-]+)"', source))
+        for rel in all_docs():
+            for line in read(rel).splitlines():
+                for rest in line.split("agentflow-e2e ")[1:]:
+                    sub = re.match(r"[a-z]+", rest)
+                    if not sub or sub.group(0) not in ("select", "run", "wait"):
+                        continue
+                    with self.subTest("%s: %s" % (rel, rest[:40])):
+                        self.assertIn(sub.group(0), subs)
+                        for flag in re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", rest.split("`", 1)[0]):
+                            self.assertIn('"%s"' % flag, source)
+
     def test_tool_subcommands_exist(self):
         settings, journal = read("bin/agentflow-settings"), read("bin/agentflow-journal")
         for rel in all_docs():
@@ -306,7 +322,7 @@ class StateMachine(unittest.TestCase):
         ("agents/sa.md", r"đường gây lỗi", "mục bug phải có đường gây lỗi"),
         ("references/dispatch.md", r"agentflow-board preflight`, chạy lại ngay trước mỗi lượt spawn", "mạng chặn push thì dừng trước khi tốn token"),
         ("references/dispatch.md", r"`SendMessage`.*\*\*một lần\*\*", "agent chạm maxTurns được làm nốt một lần trước khi blocked"),
-        ("references/protocol.md", r"Subagent không chạy lệnh nền", "lệnh nền làm agent chạy tiếp sau khi orchestrator đã kết luận"),
+        ("references/protocol.md", r"Không `run_in_background`, không poll bằng `sleep`/`until`", "lệnh nền làm agent chạy tiếp sau khi orchestrator đã kết luận; poll đọc lại cả context"),
         ("agents/dev.md", r"Commit đầu tiên ⇒ push \+ mở draft PR ngay", "DEV push checkpoint sớm"),
         ("agents/sa.md", r"Size \(trống thì tự ước lượng", "ticket thiếu Size vẫn qua DoR có kiểm"),
         ("agents/sa.md", r"\*\*DoR\*\*", "SA chặn ticket chưa đủ trước khi thiết kế"),
@@ -330,7 +346,7 @@ class StateMachine(unittest.TestCase):
         ("agents/sa.md", r"escalate: `· escalated`", "escalate thì dừng chain, không spawn DEV ngay"),
         ("agents/dev.md", r"Chạy khi head PR ≠ `test_sha`", "không ghi test_sha cho head chưa chạy flow"),
         ("agents/dev.md", r"kể cả khi merge `Already up to date`", "resume sau khi chết lúc chờ pipeline vẫn chờ deploy"),
-        ("agents/dev.md", r"Bash `timeout: 300000`", "lệnh chờ pipeline không bị Bash cắt ở 2 phút"),
+        ("agents/dev.md", r"Bash `timeout: 170000`", "lệnh chờ pipeline xong trước mốc 180 giây harness đẩy nền"),
         ("references/protocol.md", r"`\[AF:DEV\] fixed\|reply` mới hơn", "DEV trả lời không sửa code vẫn là vòng mới"),
         ("agents/sa.md", r"unit/mock test mới mà `CLAUDE.md` không bắt buộc", "plugin không viết mock test"),
         ("agents/sa.md", r"\*\*Có mục \(có nội dung\) chưa tick\*\* ⇒ state `stage: in_qc`", "còn QC tay thì chờ QC người"),
@@ -338,7 +354,7 @@ class StateMachine(unittest.TestCase):
         ("agents/sa.md", r"\*\*Không có\*\* ⇒ state `stage: ready_to_merge`.*\*\*`update_pull_request draft=false`\*\*", "không có QC tay thì SA undraft"),
         ("agents/dev.md", r"\|\| \{ echo MERGE_CONFLICT", "conflict dừng khối deploy"),
         ("agents/dev.md", r"Không bao giờ merge staging vào nhánh ticket", "DEV không đưa code ticket khác vào PR"),
-        ("agents/dev.md", r"--wait 4", "chờ pipeline theo nhịp giữ prompt cache"),
+        ("agents/dev.md", r"--wait 2\.5", "chờ pipeline dưới 180 giây, vẫn trong TTL của prompt cache"),
         ("agents/dev.md", r"`--skip '<glob>'` cho mỗi mục `staging.skip_checks`", "không chờ release mobile"),
         ("agents/dev.md", r"Tối đa `run.max_test_rounds` vòng", "vòng sửa test có trần"),
         ("agents/dev.md", r"\*\*Lỗi block\*\*.*`\[AF:DEV\] blocked`", "hết vòng thì ghi lỗi block lên issue"),
@@ -346,6 +362,14 @@ class StateMachine(unittest.TestCase):
         ("agents/dev.md", r"không viết unit/integration test có mock", "plugin không viết mock test"),
         ("agents/dev.md", r"`test_sha: <head>`", "DEV ghi head đã test cho SA"),
         ("references/automation.md", r"\*\*Chọn flow liên quan\*\*", "chỉ chạy flow liên quan, không cả suite"),
+        # 3.5 (người dùng chọn 2026-11-14): SA chốt regression, flow mới 1 + 2 lần, DEV tách lượt verify
+        ("agents/sa.md", r"\*\*Regression\*\* — flow có sẵn DEV chạy lại.*≤ `run.max_regression`", "SA chốt flow regression có trần"),
+        ("agents/sa.md", r"`only: web` \(chỉ chạm backend\) ⇒ chỉ flow web", "diff chỉ chạm backend thì regression chỉ trên web"),
+        ("references/automation.md", r"đúng mục \*\*Regression\*\* của `\[AF:SA\] design`", "DEV chạy đúng danh sách SA chốt"),
+        ("references/automation.md", r"head cuối chạy thêm `--repeat 2`", "flow mới chạy 1 lần khi sửa, thêm 2 lần ở head cuối"),
+        ("agents/dev.md", r"\*\*Tách lượt\*\*.*`RESULT: in_progress · verify`", "phần chạy flow ở context mới"),
+        ("references/dispatch.md", r"RESULT `verify`.*spawn ngay DEV `MODE=verify`", "orchestrator nối lượt verify"),
+        ("references/protocol.md", r"`verify` = DEV đã code \+ deploy staging", "RESULT verify có nghĩa"),
         ("references/automation.md", r"không chờ release mobile", "mobile test bằng build local trỏ staging"),
         ("references/automation.md", r"Chỉ mở ảnh \(Read\) khi flow fail, cộng \*\*một\*\* ảnh cuối mỗi AC UI", "xem ảnh tiết kiệm token"),
         ("references/automation.md", r"\*\*QC tay\*\* \(chặn merge", "QC tay là cổng duy nhất của QC người"),

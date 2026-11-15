@@ -20,7 +20,8 @@ HOME_SECRETS = (".ssh/", ".aws/credentials", ".config/gh/hosts.yml", ".claude/.c
 
 STAGES = ["backlog", "ready", "in_progress", "in_review", "in_qc", "ready_to_merge", "done"]
 LABEL_KEYS = ["agent", "blocked", "needs_info", "changes_requested", "qc_failed", "qc_manual"]
-TOP_KEYS = {"schema", "lang", "board", "classify", "types", "labels", "git", "surfaces", "forbidden", "design", "staging", "people", "run", "notify"}
+TOP_KEYS = {"schema", "lang", "board", "classify", "types", "labels", "git", "surfaces", "e2e_map", "forbidden", "design", "staging",
+            "people", "run", "notify"}
 NOTIFY_EVENTS = {"blocked", "needs_info", "qc_manual", "ready_to_merge"}
 SECRET_VALUE = re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|\b\d{8,10}:[A-Za-z0-9_-]{35}\b"
                           r"|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAKIA[0-9A-Z]{16}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----")
@@ -322,7 +323,12 @@ def validate_config(cfg):
             warn("surfaces.%s.e2e_ci không còn dùng (3.0: DEV tự chạy flow trên staging) — xoá được" % key)
         if not isinstance(surface.get("install") or "", str):
             fail("surfaces.%s.install phải là một lệnh (chuỗi)" % key)
-    for key in ("parallel", "max_tasks", "max_review_rounds", "max_qc_rounds", "max_test_rounds"):
+    e2e_map = cfg.get("e2e_map")
+    if e2e_map is not None and (not isinstance(e2e_map, dict) or not all(
+            isinstance(glob, str) and glob and as_list(tags) and all(isinstance(t, str) and t for t in as_list(tags))
+            for glob, tags in e2e_map.items())):
+        fail("e2e_map phải là map glob path → danh sách tag của flow, vd \"backend/services/inbox/**\": [inbox]")
+    for key in ("parallel", "max_tasks", "max_review_rounds", "max_qc_rounds", "max_test_rounds", "max_regression"):
         positive_int("run", key)
     positive_int("staging", "timeout_min")
     skip = (cfg.get("staging") or {}).get("skip_checks")

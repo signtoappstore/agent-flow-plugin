@@ -131,6 +131,7 @@ NOT_OVERBLOCKED = [
     "gh api -X DELETE repos/o/r/issues/1/labels/blocked", "gh repo view o/r", "gh api repos/o/r", "gh api -X PATCH repos/o/r/issues/1 -f state=open",
     # Blocked by mistake until the same red-team pass: an unattended loop stalls on these.
     "flutter build web --dart-define-from-file=.env.staging", "dotenv -e .env.test -- pnpm test", "jq .env package.json", "grep -e .env .gitignore", "grep -A 3 .env README.md",
+    "agentflow-e2e run --issue 4 --dir web --env-file .env.e2e .maestro/af-4-tc1.yaml",  # values go to maestro, never to stdout
     "sed -i '' 's/.env/.env.local/' README.md", "tar --exclude=.env -czf x.tgz .", "tar czf x.tgz --exclude .env .", "find . -maxdepth 2 -name .env", "git grep .env", "git log -S .env --oneline",
     "git checkout -b feat/9 origin/master && git add -A && git commit -m x && git push -u origin HEAD", "git switch -c feat/9 && git push -u origin HEAD",
     'echo "$GHCR_TOKEN" | docker login ghcr.io -u me --password-stdin', 'echo "$GH_TOKEN" | gh auth login --with-token', "echo ${GITHUB_TOKEN:+set}", "echo 'Set $GITHUB_TOKEN first'",

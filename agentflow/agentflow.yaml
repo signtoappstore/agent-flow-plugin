@@ -61,6 +61,12 @@ git:
 #     install: ""              # mobile, tuỳ chọn — build + cài bản trỏ server staging lên emulator/simulator đang chạy,
 #                              # vd "flutter build apk --flavor staging && adb install -r build/app/outputs/flutter-apk/app-staging-release.apk"
 
+# ── E2E MAP (tuỳ chọn) ───────────────────────────────────────────────────────
+# Path bị đổi (glob tính từ root repo) → tag của flow có sẵn trong e2e_dir. `agentflow-e2e select` dùng để gợi ý
+# flow regression cho SA, nhất là khi diff chỉ chạm backend (flow UI không chứa path code backend). Flow gắn tag vùng, vd tags: [inbox].
+e2e_map: {}
+#   "backend/services/notification/**": [inbox]
+
 # Glob agent KHÔNG được sửa hay in nội dung (hợp với mặc định của plugin: .env*, *.pem, *.key, *.p12, *.pfx, *.jks, *.keystore, .netrc, .git-credentials, id_rsa, id_ed25519).
 forbidden: []
 
@@ -92,6 +98,7 @@ run:
   max_review_rounds: 3         # số ❌ review liên tiếp; lần kế tiếp → escalate
   max_qc_rounds: 2             # số lần QC người fail cho đến khi pass; lần kế tiếp → escalate
   max_test_rounds: 3           # số vòng DEV tự sửa khi flow fail trên staging trong một lượt; hết vòng → lỗi block lên issue
+  max_regression: 6            # số flow có sẵn tối đa SA chọn chạy lại mỗi ticket (ngoài flow của ticket); phần dư → Đề xuất kiểm chứng thêm
   models:
     dev: { default: opus }        # thêm key theo Size để đổi model, vd L: fable. Effort nằm ở frontmatter của agent
     sa: opus                     # SA thiết kế trước DEV + review. Config bản 2.x ghi `reviewer:` vẫn được đọc

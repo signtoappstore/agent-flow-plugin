@@ -29,10 +29,10 @@ Viết từ AC, user flow, design và rủi ro — không từ code. Mỗi AC:
 
 ## Chạy
 
-- **Chọn flow liên quan**: flow của ticket (`tags: [af-<n>]`) + flow có sẵn đi qua phần diff chạm: `git diff --name-only origin/<base>...` → Grep id, tên màn, route, path API của file bị đổi trong `e2e_dir`. Cả suite (`surfaces.<key>.e2e`) chỉ khi diff chạm phần dùng chung (auth, điều hướng, API client, theme, migration).
-- Flow mới chạy **3 lần liên tiếp** mới tính pass; flow có sẵn chạy 1 lần. Vòng sửa: chạy lại flow fail + flow liên quan phần vừa sửa.
-- **Web**: `url: ${STAGING_URL}`, value `staging.url`. **Mobile**: build + cài bản trỏ server staging bằng `surfaces.<key>.install` lên emulator/simulator đang chạy (thiếu key ⇒ dò cách build flavor staging một lần theo `CLAUDE.md`/README, journal `slow` đề xuất key); không chờ release mobile của pipeline. Không có thiết bị, `maestro` hay `staging.url` ⇒ case đó thành QC tay, không phải fail.
-- Output: `cd "$WT/<surface path>" && maestro test … --format junit --output /tmp/af-<n>-e2e.xml --test-output-dir /tmp/af-<n>-maestro <flows> > /tmp/af-<n>-e2e.log 2>&1; echo "exit $?"`. Chỉ đọc đuôi log và junit khi fail.
+- **Chọn flow liên quan**: flow của ticket (`tags: [af-<n>]`) + đúng mục **Regression** của `[AF:SA] design`. Diff thật chạm vùng thiết kế không nói ⇒ `agentflow-e2e select --diff origin/<base>...origin/<branch> --issue <n>`, thêm flow cần, ghi PR mục "Lệch thiết kế". Cả suite chỉ khi Regression ghi vậy.
+- Flow mới chạy 1 lần khi viết/sửa; head cuối chạy thêm `--repeat 2` mới tính pass. Flow có sẵn 1 lần. Vòng sửa: chạy lại flow fail + flow liên quan phần vừa sửa.
+- **Web**: `url: ${STAGING_URL}`, value `staging.url`. **Mobile**: build + cài bản trỏ server staging bằng `surfaces.<key>.install` lên emulator/simulator đang chạy (thiếu key ⇒ dò cách build flavor staging một lần theo `CLAUDE.md`/README, journal `slow` đề xuất key) — chỉ khi code của surface (ngoài `e2e_dir`) khác sha ở `/tmp/af-<key>-installed.sha` của lần cài trước; không chờ release mobile. Không có thiết bị, `maestro` hay `staging.url` ⇒ case đó thành QC tay, không phải fail.
+- **Chạy**: `agentflow-e2e run --issue <n> --dir "$WT/<surface path>" --name <key> [--repeat 2] [--maestro="<cờ của surfaces.<key>.e2e>"] [--env-file <file>] <flows>` (trả ngay; web, mobile song song được; lần đầu mỗi lượt thêm `--reset`), rồi `agentflow-e2e wait --issue <n>` theo protocol §9. Chỉ đọc log của flow fail.
 
 ## Phân định fail
 
@@ -44,17 +44,17 @@ Viết từ AC, user flow, design và rủi ro — không từ code. Mỗi AC:
 
 ## Ảnh UI/UX
 
-Flow `takeScreenshot: af-<n>-tc<j>` ở state cuối mỗi case UI (ảnh ở `/tmp/af-<n>-maestro`). Chỉ mở ảnh (Read) khi flow fail, cộng **một** ảnh cuối mỗi AC UI để soát lệch rõ so với design/AC: chữ cắt, tràn, chồng, sai ngôn ngữ, sai bố cục, thiếu trạng thái. Lệch do ticket ⇒ sửa. Góp ý cảm quan ⇒ "Đề xuất kiểm chứng thêm". Không dùng `assertWithAI`, `assertNoDefectsWithAI`, `extractTextWithAI` (cần API key, gửi ảnh staging ra ngoài). `assertScreenshot` chỉ khi repo đã có ảnh chuẩn.
+Flow `takeScreenshot: af-<n>-tc<j>` ở state cuối mỗi case UI (ảnh ở thư mục `out` của lượt chạy). Chỉ mở ảnh (Read) khi flow fail, cộng **một** ảnh cuối mỗi AC UI để soát lệch rõ so với design/AC: chữ cắt, tràn, chồng, sai ngôn ngữ, sai bố cục, thiếu trạng thái. Lệch do ticket ⇒ sửa. Góp ý cảm quan ⇒ "Đề xuất kiểm chứng thêm". Không dùng `assertWithAI`, `assertNoDefectsWithAI`, `extractTextWithAI` (cần API key, gửi ảnh staging ra ngoài). `assertScreenshot` chỉ khi repo đã có ảnh chuẩn.
 
 ## Maestro
 
 - Header: `appId: ${APP_ID}` (mobile, hoặc như flow có sẵn) / `url: ${STAGING_URL}` (web), `name:`, `tags: [af-<n>]`, rồi `---`. Mobile mở đầu `launchApp` với `clearState: true`, `permissions: { all: allow }`.
-- App id, tài khoản test: đọc ở secret folder `staging.notes` của `<repo root>` (không phải worktree). Flow dùng `${VAR}`, value qua `-e`: `maestro test -e APP_ID=<…> <flow>`. Không ghi value vào file, PR, comment.
-- Nhiều thiết bị đang chạy ⇒ `maestro --device <udid> test …`. Chạy 3 lần = lặp lệnh, không `repeat` trong flow.
+- App id, tài khoản test: file KEY=VALUE trong secret folder `staging.notes` của `<repo root>` (không phải worktree) ⇒ `--env-file`, không Read; folder không có file dạng đó thì đọc rồi `-e K=V`. Flow dùng `${VAR}`. Không ghi value vào file, PR, comment.
+- Nhiều thiết bị đang chạy ⇒ `--device <udid>`. Lặp = `--repeat`, không `repeat` trong flow.
 
 ## Framework khác của repo
 
-Surface đã dùng Playwright, Cypress, Flutter `integration_test`, Detox… trong `e2e_dir` ⇒ theo đúng framework đó với cùng nguyên tắc: chọn bằng test id (Playwright `getByTestId`, rồi `getByRole` / `getByLabel`), assert web-first, không `waitForTimeout`, dữ liệu riêng, nhắm `staging.url`, flow mới chạy 3 lần (`--repeat-each=3`), output ra `/tmp/af-<n>-…`.
+Surface đã dùng Playwright, Cypress, Flutter `integration_test`, Detox… trong `e2e_dir` ⇒ theo đúng framework đó với cùng nguyên tắc: chọn bằng test id (Playwright `getByTestId`, rồi `getByRole` / `getByLabel`), assert web-first, không `waitForTimeout`, dữ liệu riêng, nhắm `staging.url`, lặp như §Chạy (`--repeat-each`), lệnh dài theo protocol §9, output ra `/tmp/af-<n>-…`.
 
 ## Kiểm chứng lại (mục của PR)
 

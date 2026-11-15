@@ -63,7 +63,7 @@ Model: DEV = `run.models.dev[<Size>]` nếu có, không thì `run.models.dev.def
 
 ```
 Agent(subagent_type="agentflow:<sa|dev>", model=<model>,
-      prompt="REPO: <owner/repo>\nISSUE: #<n>\nITEM_ID: <item_id>\nSTAGE: <stage key, vd in_review, sau SYS transition>\nMODE: <mode của bảng §3>\nSIZE: <Size, chỉ DEV, nếu có>")
+      prompt="REPO: <owner/repo>\nISSUE: #<n>\nITEM_ID: <item_id>\nSTAGE: <stage key, vd in_review, sau SYS transition>\nMODE: <mode của bảng §3, hoặc verify theo §6>\nSIZE: <Size, chỉ DEV, nếu có>")
 ```
 
 - Song song: tối đa `run.parallel` ticket **khác nhau** trong **một** message. Một ticket không bao giờ có 2 agent cùng lúc. Mỗi ticket một worktree (protocol §8).
@@ -73,11 +73,11 @@ Agent(subagent_type="agentflow:<sa|dev>", model=<model>,
 ## 6. Sau mỗi kết quả
 
 1. Đọc khối `RESULT` (bỏ qua narrative). Đọc lại Status bằng `get_project_item` (`field_names: ["Status"]`) — **Status là sự thật**. Không có `RESULT`: thông báo nói agent còn chạy nền ⇒ chờ thông báo kế. Đã dừng hẳn (`maxTurns`, chết giữa chừng) ⇒ `SendMessage` (ToolSearch) cho chính agent đó **một lần** "làm nốt, kết thúc bằng khối RESULT" (tính một spawn); vẫn không có ⇒ gắn `blocked`, comment `[AF:SYS] stuck — <agent> dừng không có RESULT, ticket ở <stage>`, journal `tool_error`, dừng ticket.
-2. RESULT ≠ `ok` (`waiting_human`, `needs_info`, `blocked`, `escalated`, `abort`) → **dừng ticket**, đếm là 1 ticket xong.
-3. RESULT `ok` + tới `ready_to_merge` → dừng ticket, đếm 1.
+2. RESULT ≠ `ok`, `verify` (`waiting_human`, `needs_info`, `blocked`, `escalated`, `abort`) → **dừng ticket**, đếm là 1 ticket xong.
+3. RESULT `ok` + tới `ready_to_merge` → dừng ticket, đếm 1. RESULT `verify` (DEV đã code + deploy, Status vẫn `in_progress`) → spawn ngay DEV `MODE=verify`, `STAGE: in_progress` cho ticket đó (context mới); `verify` hai lần liền ⇒ như no-progress (5).
 4. RESULT `ok` + stage mới do agent sở hữu → **đi tiếp ngay ticket đó** ở lượt spawn kế (chain SA design → DEV → SA review; SA ❌ → DEV `MODE=rework` → SA …). Ticket ở `ready`: đọc state rồi chọn dòng §3.
 5. **No-progress guard** (chỉ khi RESULT `ok`): Status không đổi → không spawn lại (SA design giữ `ready` là đúng; thay vào đó: sau SA design state phải có `design` và ticket mang `labels.agent`): gắn `blocked`, comment `[AF:SYS] stuck — <agent> báo ok nhưng ticket vẫn ở <stage>`, journal `tool_error`, dừng ticket.
-6. Trần mỗi ticket: `(run.max_qc_rounds + 1) × (2 × run.max_review_rounds + 2) + 2` lần spawn — chạm trần → gắn `blocked` + `[AF:SYS] stuck`, dừng ticket.
+6. Trần mỗi ticket: `(run.max_qc_rounds + 1) × (3 × run.max_review_rounds + 3) + 2` lần spawn — chạm trần → gắn `blocked` + `[AF:SYS] stuck`, dừng ticket.
 7. Trong context chỉ giữ bảng ngắn `#n · stage · kết quả`.
 
 ## 7. Dừng lượt

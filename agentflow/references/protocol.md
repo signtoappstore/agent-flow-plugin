@@ -112,7 +112,7 @@ Agent dùng token của người dùng ⇒ cùng login: **prefix là cách duy n
 - Lệnh check/test/e2e/install lấy từ `surfaces.<key>.*`, không dò `package.json`/CI. Thiếu thì dò một lần, journal `kind=slow` đề xuất thêm vào config.
 - Đọc file theo phần (`offset`/`limit`), dùng Grep trước khi Read. Không Read lại file vừa sửa.
 - Diff: `git diff --stat` trước, chỉ mở file liên quan AC.
-- Subagent không chạy lệnh nền: lệnh dài chạy foreground có `timeout`, output vào log.
+- Lệnh có thể quá 160 giây (build, cài app; harness đẩy nền lệnh sau 180 giây dù có `timeout`): chạy tách `(<lệnh> > <log> 2>&1; echo "exit $?" >> <log>) &` (flow: `agentflow-e2e run`), chờ bằng `agentflow-e2e wait --log <log>` / `--issue <n>`, Bash `timeout: 170000`, gọi lại khi exit 2; trong lúc chờ làm việc khác. Không `run_in_background`, không poll bằng `sleep`/`until`.
 
 ## 10. Journal (nguyên liệu cho `/agentflow:learn`)
 
@@ -139,9 +139,9 @@ Không in/echo token, không Read/sửa path `forbidden` (mặc định `.claude
 Subagent kết thúc bằng đúng khối này (orchestrator chỉ đọc khối này, không đọc narrative; hook trả agent về nếu thiếu):
 
 ```
-RESULT: <stage hiện tại> · <ok|waiting_human|needs_info|blocked|escalated|abort>
+RESULT: <stage hiện tại> · <ok|verify|waiting_human|needs_info|blocked|escalated|abort>
 PR: #<m> @<sha>        (bỏ nếu không có)
 NOTE: <≤ 2 dòng: đã làm gì / người cần làm gì>
 ```
 
-`ok` = đã chuyển sang stage kế · `waiting_human` = dừng đúng chỗ chờ người, Status giữ nguyên là bình thường (vd chờ QC người ở `in_qc`).
+`ok` = đã chuyển sang stage kế · `verify` = DEV đã code + deploy staging, cần lượt verify · `waiting_human` = dừng đúng chỗ chờ người, Status giữ nguyên là bình thường (vd chờ QC người ở `in_qc`).

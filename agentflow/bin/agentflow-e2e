@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+"""AgentFlow e2e helper (stdlib only): which existing flows a change should re-run, and running Maestro flows apart from
+the agent's shell. A subagent's foreground command is moved to the background after 180 s whatever its `timeout`, and
+every poll after that is a turn that re-reads the whole context — so runs are detached and awaited in short steps.
+
+  select (--diff RANGE | --paths P...) [--ref REF] [--issue N] [--max N]   flows to re-run + why; one JSON line
+  run --issue N --dir DIR [--name X] [--reset] [--repeat K] [--device UDID] [--maestro=ARGS] [--env-file F]... [-e K=V]... FLOW...
+                                                                            start detached, return at once; --reset (first run
+                                                                            of a turn) drops the issue's earlier runs
+  wait --issue N [--name X] [--max SEC]     until the runs end or SEC pass (default 160); one JSON line
+  wait --log FILE [--max SEC] [--tail N]    until FILE has a line `exit <code>`, for `(cmd > FILE 2>&1; echo "exit $?" >> FILE) &`
+
+select: the ticket's flows (tag af-<n>), then existing flows ranked by evidence — flow file changed, `e2e_map` (glob of a
+changed path → flow tag), API path of a flow script whose first segment names a changed folder, element id of a flow
+quoted in a changed file. A diff that touches no client code (outside each surface's e2e_dir) keeps regression to the
+web surface. More than `run.max_regression` (default 6) → `over`, for the SA to list as a manual check.
+
+wait exit code: 0 done and green · 1 done with a failure · 2 still running (call again) · 3 nothing to wait for.
+"""
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "scripts"))
+import afconfig  # noqa: E402
+
+TMP = os.environ.get("AGENTFLOW_E2E_TMP") or "/tmp"
+FLOW_EXT = (".yaml", ".yml")
+MAX_REGRESSION = 6
+WAIT_DEFAULT = 160
+SCORE = {"changed": 4, "map": 3, "api": 2, "id": 1}
+GENERIC_DIRS = {"src", "lib", "app", "apps", "services", "service", "packages", "backend", "server", "api", "routes", "core",
+                "shared", "common", "internal", "pkg", "test", "tests", "main", "java", "kotlin", "dart", "js", "ts"}
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+TAGS_FLOW = re.compile(r"^tags:\s*\[([^\]]*)\]", re.M)
+TAGS_BLOCK = re.compile(r"^tags:\s*\n((?:[ \t]+-[^\n]*\n?)+)", re.M)
+ID_REF = re.compile(r"^\s*-?\s*id:\s*[\"']?([^\"'\n#]+?)[\"']?\s*$", re.M)
+FILE_REF = re.compile(r"^\s*-?\s*(?:runFlow|runScript|file):\s*[\"']?([\w./-]+\.(?:ya?ml|js))[\"']?\s*$", re.M)
+API_PATH = re.compile(r"[\"'`]/([a-z][\w-]*)/[\w/{}:?=&.-]*[\"'`]")
+EXIT_LINE = re.compile(r"^exit (-?\d+)\s*$", re.M)
+# Where a UI element id can be written: source, markup, string tables. Assets (audio, images, models) are skipped unread.
+ID_SOURCES = {".dart", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte", ".kt", ".kts", ".java", ".swift",
+              ".m", ".mm", ".xml", ".html", ".htm", ".json", ".arb", ".strings", ".xcstrings", ".properties", ".cs", ".go"}
+
+
+def emit(obj, code=0):
+    print(json.dumps(obj, ensure_ascii=False))
+    return code
+
+
+# ── select ───────────────────────────────────────────────────────────────────
+
+
+class Tree:
+    """Files of the working tree, or of a git ref (the SA designs on origin/<base>, not on whatever is checked out)."""
+
+    def __init__(self, root, ref=None):
+        self.root, self.ref = root, ref
+
+    def read(self, rel, limit=400_000):
+        if self.ref:
+            try:
+                out = subprocess.run(["git", "show", "%s:%s" % (self.ref, rel)], cwd=self.root, capture_output=True, timeout=20)
+            except (OSError, subprocess.SubprocessError):
+                return ""
+            data = out.stdout if out.returncode == 0 else b""
+        else:
+            try:
+                with open(os.path.join(self.root, rel), "rb") as fh:
+                    data = fh.read(limit + 1)
+            except OSError:
+                return ""
+        if len(data) > limit or b"\0" in data[:4096]:
+            return ""  # binary or generated: no flow id lives there
+        return data.decode("utf-8", "replace")
+
+    def files(self, folder):
+        folder = folder.rstrip("/")
+        if self.ref:
+            out = afconfig.git(["ls-tree", "--name-only", "%s:%s" % (self.ref, folder)], cwd=self.root, timeout=20) or ""
+            names = out.splitlines()
+        else:
+            try:
+                names = [n for n in os.listdir(os.path.join(self.root, folder)) if os.path.isfile(os.path.join(self.root, folder, n))]
+            except OSError:
+                names = []
+        return sorted("%s/%s" % (folder, n) for n in names)
+
+
+def flow_tags(text):
+    head = text.split("\n---", 1)[0] if "\n---" in text else ""
+    match = TAGS_FLOW.search(head)
+    if match:
+        return {t.strip().strip("\"'") for t in match.group(1).split(",") if t.strip()}
+    match = TAGS_BLOCK.search(head)
+    if match:
+        return {line.strip()[1:].strip().strip("\"'") for line in match.group(1).splitlines() if line.strip().startswith("-")}
+    return set()
+
+
+def _refs(tree, path, depth=3, seen=None):
+    """Subflows and scripts a flow pulls in (runFlow / runScript / file:), a few levels deep."""
+    seen = set() if seen is None else seen
+    for ref in FILE_REF.findall(tree.read(path)):
+        sub = os.path.normpath(os.path.join(os.path.dirname(path), ref)).replace("\\", "/")
+        if sub not in seen:
+            seen.add(sub)
+            if depth > 1 and sub.endswith(FLOW_EXT):
+                _refs(tree, sub, depth - 1, seen)
+    return seen
+
+
+def index_flows(tree, cfg):
+    """{flow path: {surface, tags, ids, api}} for the top-level flows of each surface's e2e_dir. Steps of a subflow count
+    for the flows that use it, except a subflow most flows use (sign-in): it says nothing about which flow a change hits."""
+    flows = {}
+    for key, surface in (cfg.get("surfaces") or {}).items():
+        if not isinstance(surface, dict) or not surface.get("e2e_dir"):
+            continue
+        folder = os.path.normpath(os.path.join(str(surface.get("path") or ""), str(surface["e2e_dir"]))).replace("\\", "/")
+        paths = [p for p in tree.files(folder) if p.endswith(FLOW_EXT) and os.path.basename(p) not in ("config.yaml", "config.yml")]
+        refs = {p: _refs(tree, p) for p in paths}
+        used = {}
+        for subs in refs.values():
+            for sub in subs:
+                used[sub] = used.get(sub, 0) + 1
+        common = max(5, 0.3 * len(paths))
+        for path in paths:
+            text = tree.read(path)
+            parts = [text] + [tree.read(sub) for sub in sorted(refs[path]) if used[sub] < common]
+            ids = {i.strip() for part in parts for i in ID_REF.findall(part) if "${" not in i}
+            api = {seg for part in parts for seg in API_PATH.findall(part)}
+            flows[path] = {"surface": key, "tags": flow_tags(text), "ids": ids, "api": api}
+    return flows
+
+
+def surface_dirs(cfg):
+    out = {}
+    for key, surface in (cfg.get("surfaces") or {}).items():
+        if isinstance(surface, dict) and surface.get("e2e_dir"):
+            path = os.path.normpath(str(surface.get("path") or ".")).replace("\\", "/")
+            path = "" if path == "." else path
+            e2e = os.path.normpath(os.path.join(path, str(surface["e2e_dir"]))).replace("\\", "/")
+            out[key] = (path + "/" if path else "", e2e + "/")
+    return out
+
+
+def web_surface(cfg):
+    surfaces = {k: s for k, s in (cfg.get("surfaces") or {}).items() if isinstance(s, dict) and s.get("e2e_dir")}
+    for key, surface in surfaces.items():
+        if str(surface.get("platform") or key).lower() == "web" or key.lower() == "web":
+            return key
+    no_device = [k for k, s in surfaces.items() if not s.get("install")]
+    return no_device[0] if no_device else None
+
+
+def select(tree, cfg, changed, issue=None, cap=MAX_REGRESSION):
+    flows = index_flows(tree, cfg)
+    dirs = surface_dirs(cfg)
+    client = sorted(k for k, (path, e2e) in dirs.items() if any(p.startswith(path) and not p.startswith(e2e) for p in changed))
+    only = web_surface(cfg) if changed and not client else None
+    ticket_tag = "af-%s" % issue if issue else None
+    ticket, found = [], {}
+
+    def add(flow, kind, why):
+        found.setdefault(flow, []).append((kind, why))
+
+    contents = {}  # element ids live in client code: only changed files of a surface, outside its flows
+    for key, (path_prefix, e2e) in dirs.items():
+        for path in changed:
+            if path.startswith(path_prefix) and not path.startswith(e2e) and os.path.splitext(path)[1].lower() in ID_SOURCES:
+                contents.setdefault(key, {})[path] = tree.read(path)
+    for flow, info in flows.items():
+        if ticket_tag and ticket_tag in info["tags"]:
+            ticket.append(flow)
+            continue
+        if flow in changed:
+            add(flow, "changed", "flow đổi trong diff")
+        for glob, tags in ((cfg.get("e2e_map") or {}).items()):
+            hit = info["tags"] & set(afconfig.as_list(tags))
+            path = next((p for p in changed if afconfig._glob_to_regex(str(glob)).match(p)), None) if hit else None
+            if path:
+                add(flow, "map", "%s←%s" % (",".join(sorted(hit)), glob))
+        for seg in sorted(info["api"]):
+            path = next((p for p in changed if seg not in GENERIC_DIRS and seg in p.split("/")[:-1]), None)
+            if path:
+                add(flow, "api", "/%s←%s" % (seg, path))
+        for ident in sorted(info["ids"]):
+            if len(ident) < 4:
+                continue
+            quoted = ("'%s'" % ident, '"%s"' % ident, "`%s`" % ident)
+            own = contents.get(info["surface"]) or {}
+            path = next((p for p, text in own.items() if text and any(q in text for q in quoted)), None)
+            if path:
+                add(flow, "id", "%s←%s" % (ident, path))
+                break
+    ranked = []
+    for flow, why in found.items():
+        if only and flows[flow]["surface"] != only:
+            continue
+        best = {}
+        for kind, text in why:
+            best.setdefault(kind, text)  # one reason per kind keeps the line short
+        score = sum(SCORE[k] for k in best)
+        ranked.append((-score, flow, ["%s:%s" % (k, v) for k, v in sorted(best.items(), key=lambda kv: -SCORE[kv[0]])]))
+    ranked.sort()
+    pick = [{"flow": f, "why": w} for _, f, w in ranked[:cap]]
+    return {"changed": len(changed), "client": client, "only": only, "ticket": sorted(ticket), "regression": pick,
+            "over": [f for _, f, _ in ranked[cap:]], "max": cap}
+
+
+def cmd_select(a):
+    root = afconfig.repo_root()
+    cfg = afconfig.load_config(root) if root else None
+    if not cfg:
+        return emit({"error": "không thấy agentflow.yaml — chạy trong repo đã /agentflow:init"}, 3)
+    if a.paths:
+        changed = [p[2:] if p.startswith("./") else p for p in a.paths]
+    else:
+        out = afconfig.git(["diff", "--name-only", a.diff], cwd=root, timeout=30)
+        if out is None:
+            return emit({"error": "git diff --name-only %s lỗi (fetch chưa?)" % a.diff}, 3)
+        changed = [p for p in out.splitlines() if p]
+    cap = a.max or ((cfg.get("run") or {}).get("max_regression")) or MAX_REGRESSION
+    return emit(select(Tree(root, a.ref), cfg, changed, a.issue, int(cap)))
+
+
+# ── run / wait ───────────────────────────────────────────────────────────────
+
+
+def run_dir(issue, name):
+    return os.path.join(TMP, "af-%s-e2e" % issue, re.sub(r"[^\w.-]+", "_", name))
+
+
+def load_state(folder):
+    try:
+        with open(os.path.join(folder, "state.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def save_state(folder, state):
+    tmp = os.path.join(folder, "state.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, ensure_ascii=False)
+    os.replace(tmp, os.path.join(folder, "state.json"))
+
+
+def alive(pid, folder=None):
+    """The runner of `folder` still runs. A pid from an old state file may now belong to another process: check its
+    command line names the folder before trusting it (and before killing its group)."""
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ValueError, TypeError):
+        return False
+    if folder:
+        try:
+            cmd = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(int(pid))], capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return True
+        return "_runner" in cmd and folder in cmd
+    return True
+
+
+def stop(folder):
+    state = load_state(folder)
+    if state and not state.get("done") and alive(state.get("pid"), folder):
+        try:
+            os.killpg(int(state["pid"]), signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+
+
+def read_env_files(paths):
+    """KEY=VALUE lines (`export` and quotes allowed). Values go to maestro as `-e`, never to stdout."""
+    env = {}
+    for path in paths or ():
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line[7:].partition("=") if line.startswith("export ") else line.partition("=")
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                env[key.strip()] = value
+    return env
+
+
+def cmd_run(a):
+    workdir = os.path.realpath(a.dir)
+    missing = [f for f in a.flows if not os.path.isfile(os.path.join(workdir, f))]
+    if missing:
+        return emit({"error": "không thấy flow (path tính từ --dir)", "missing": missing}, 3)
+    for path in a.env_file or ():
+        if not os.path.isfile(path):
+            return emit({"error": "không thấy --env-file %s" % path}, 3)
+    name = a.name or os.path.basename(workdir.rstrip("/"))
+    folder = run_dir(a.issue, name)
+    base = os.path.dirname(folder)
+    # A new run of the same name replaces the old one. --reset also drops the issue's other runs: results of an earlier
+    # turn (a rework, a verify spawn before this one) would make `wait --issue` report failures already fixed.
+    others = [os.path.join(base, n) for n in os.listdir(base)] if a.reset and os.path.isdir(base) else []
+    for old in [folder] + [o for o in others if o != folder]:
+        stop(old)
+        if old != folder:
+            shutil.rmtree(old, ignore_errors=True)
+    os.makedirs(folder, exist_ok=True)
+    for entry in os.listdir(folder):
+        if entry.endswith((".log", ".xml", ".json")):
+            os.remove(os.path.join(folder, entry))
+    state = {"name": name, "dir": workdir, "flows": a.flows, "repeat": a.repeat, "total": len(a.flows) * a.repeat,
+             "device": a.device, "maestro": a.maestro or "", "env_files": [os.path.realpath(p) for p in a.env_file or ()],
+             "env_keys": [kv.split("=", 1)[0] for kv in a.env or ()], "results": [], "done": False, "started": time.time()}
+    save_state(folder, state)
+    with open(os.path.join(folder, "env.json"), "w", encoding="utf-8") as fh:  # -e values stay off the state the agent reads
+        json.dump([kv for kv in a.env or ()], fh)
+    os.chmod(os.path.join(folder, "env.json"), 0o600)
+    with open(os.path.join(folder, "runner.log"), "w") as log:
+        proc = subprocess.Popen([sys.executable, "-I", os.path.realpath(__file__), "_runner", folder], cwd=workdir,
+                                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    state["pid"] = proc.pid
+    save_state(folder, state)
+    return emit({"run": name, "flows": len(a.flows), "total": state["total"], "out": folder})
+
+
+def failing_step(log_path, xml_path):
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            lines = [ANSI.sub("", l).strip() for l in fh]
+    except OSError:
+        lines = []
+    for line in reversed(lines):
+        if "FAILED" in line or "Assertion" in line or "is not visible" in line:
+            return line[:240]
+    try:
+        with open(xml_path, encoding="utf-8", errors="replace") as fh:
+            match = re.search(r"<failure[^>]*message=\"([^\"]*)\"", fh.read())
+        if match:
+            return match.group(1)[:240]
+    except OSError:
+        pass
+    return (lines[-1] if lines else "không có log")[:240]
+
+
+def cmd_runner(a):
+    folder = a.folder
+    state = load_state(folder)
+    env = read_env_files(state["env_files"])
+    try:
+        with open(os.path.join(folder, "env.json"), encoding="utf-8") as fh:
+            env.update(kv.split("=", 1) for kv in json.load(fh) if "=" in kv)
+        os.remove(os.path.join(folder, "env.json"))
+    except (OSError, ValueError):
+        pass
+    env_args = [x for k, v in env.items() for x in ("-e", "%s=%s" % (k, v))]
+    for rep in range(1, state["repeat"] + 1):
+        for flow in state["flows"]:
+            slug = re.sub(r"[^\w-]+", "_", os.path.splitext(os.path.basename(flow))[0])
+            log_path = os.path.join(folder, "%s-%d.log" % (slug, rep))
+            xml_path = os.path.join(folder, "%s-%d.xml" % (slug, rep))
+            cmd = ["maestro"] + (["--device", state["device"]] if state.get("device") else []) + ["test"]
+            cmd += shlex.split(state.get("maestro") or "") + ["--format", "junit", "--output", xml_path,
+                                                                "--test-output-dir", os.path.join(folder, "out")]
+            started = time.time()
+            with open(log_path, "w") as log:
+                try:
+                    code = subprocess.call(cmd + env_args + [flow], cwd=state["dir"], stdout=log, stderr=subprocess.STDOUT)
+                except OSError as err:
+                    log.write("%s\n" % err)
+                    code = 127
+            result = {"flow": flow, "rep": rep, "exit": code, "sec": round(time.time() - started)}
+            if code:
+                result.update(step=failing_step(log_path, xml_path), log=log_path)
+            state = load_state(folder) or state
+            state["results"].append(result)
+            save_state(folder, state)
+    state["done"], state["ended"] = True, time.time()
+    save_state(folder, state)
+    return 0
+
+
+def summary(state, folder):
+    results = state.get("results") or []
+    failed = [{k: r[k] for k in ("flow", "rep", "step", "log") if k in r} for r in results if r.get("exit")]
+    out = {"name": state.get("name"), "done": len(results), "total": state.get("total"), "failed": failed}
+    if not state.get("done") and not alive(state.get("pid"), folder):
+        out["died"] = True  # runner gone before the end: start the run again
+    return out
+
+
+def cmd_wait(a):
+    deadline = time.time() + a.max
+    if a.log:
+        while True:
+            try:
+                with open(a.log, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                text = ""
+            match = EXIT_LINE.findall(text)
+            if match or time.time() >= deadline:
+                break
+            time.sleep(max(0.2, min(3, deadline - time.time())))
+        tail = "\n".join(ANSI.sub("", text).rstrip("\n").splitlines()[-a.tail:])
+        if not match:
+            return emit({"done": False, "tail": tail}, 2)
+        code = int(match[-1])
+        return emit({"done": True, "exit": code, "tail": tail}, 0 if code == 0 else 1)
+    base = os.path.join(TMP, "af-%s-e2e" % a.issue)
+    names = [a.name] if a.name else (sorted(os.listdir(base)) if os.path.isdir(base) else [])
+    while True:
+        folders = [os.path.join(base, re.sub(r"[^\w.-]+", "_", n)) for n in names]
+        states = [(s, f) for s, f in ((load_state(f), f) for f in folders) if s]
+        if not states:
+            return emit({"done": True, "runs": [], "error": "không có lượt chạy nào của #%s" % a.issue}, 3)
+        runs = [summary(s, f) for s, f in states]
+        finished = all(s.get("done") for s, _ in states)
+        if finished or any(r.get("died") for r in runs) or time.time() >= deadline:
+            break
+        time.sleep(max(0.2, min(5, deadline - time.time())))
+    failed = any(r["failed"] for r in runs) or any(r.get("died") for r in runs)
+    return emit({"done": finished, "runs": runs}, (1 if failed else 0) if finished else (1 if any(r.get("died") for r in runs) else 2))
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="agentflow-e2e", description=__doc__.split("\n\n", 1)[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("select", help="flow có sẵn cần chạy lại cho một thay đổi")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--diff", help="range cho git diff --name-only, vd origin/master...origin/feat/42-x")
+    g.add_argument("--paths", nargs="+", help="path sẽ đổi (SA lúc thiết kế, chưa có diff)")
+    s.add_argument("--ref", help="đọc file và flow ở ref này thay vì working tree, vd origin/master")
+    s.add_argument("--issue", type=int, help="flow của ticket (tag af-<n>) tách riêng")
+    s.add_argument("--max", type=int, help="trần flow regression (mặc định run.max_regression hoặc 6)")
+    s = sub.add_parser("run", help="chạy flow Maestro tách khỏi shell, trả ngay")
+    s.add_argument("--issue", type=int, required=True)
+    s.add_argument("--dir", required=True, help="thư mục chạy maestro (path của surface trong worktree); flow tính từ đây")
+    s.add_argument("--name", help="tên lượt chạy, vd web | mobile (mặc định tên thư mục)")
+    s.add_argument("--reset", action="store_true", help="lần run đầu của lượt: bỏ mọi lượt chạy trước của issue")
+    s.add_argument("--repeat", type=int, default=1, help="số lần chạy mỗi flow")
+    s.add_argument("--device", help="udid khi có nhiều thiết bị")
+    s.add_argument("--maestro", help="cờ thêm cho `maestro test`, vd --maestro=\"--headless --screen-size 1280x860\"")
+    s.add_argument("--env-file", action="append", help="file KEY=VALUE (secret folder của staging.notes) → -e cho maestro")
+    s.add_argument("-e", "--env", action="append", help="K=V thêm cho maestro")
+    s.add_argument("flows", nargs="+")
+    s = sub.add_parser("wait", help="chờ lượt chạy (≤ --max giây) rồi in một dòng JSON")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--issue", type=int)
+    g.add_argument("--log", help="file log có dòng `exit <code>` khi lệnh nền xong")
+    s.add_argument("--name")
+    s.add_argument("--max", type=float, default=WAIT_DEFAULT, help="giây tối đa mỗi lần gọi (mặc định 160 < 180 của harness)")
+    s.add_argument("--tail", type=int, default=15, help="số dòng cuối của --log")
+    s = sub.add_parser("_runner")
+    s.add_argument("folder")
+    a = p.parse_args(argv)
+    return {"select": cmd_select, "run": cmd_run, "wait": cmd_wait, "_runner": cmd_runner}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
