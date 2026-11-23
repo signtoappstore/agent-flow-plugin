@@ -85,6 +85,15 @@ staging:
   timeout_min: 30              # pipeline quá thời gian này ⇒ blocked, báo người
   skip_checks: []              # glob tên check DEV không chờ — release mobile, vd ["distribute-mobile*", "testflight*"]
 
+# ── LÀM RÕ YÊU CẦU ───────────────────────────────────────────────────────────
+# auto = agent tự phân tích, chọn phương án tốt nhất và hợp nhất, ghi quyết định + căn cứ để người soát sau.
+# ask  = agent đưa phương án cho người chọn, rồi liệt kê việc sẽ làm để người xác nhận lần cuối mới làm.
+# Thiếu key (hoặc thiếu cả block) ⇒ ask.
+clarify:
+  task: ask                    # /agentflow:task — ask: hỏi PO, xác nhận danh sách issue sẽ ghi · auto: tự chọn, ghi mục "Giả định" vào ticket
+  implement: ask               # trước khi DEV code — auto: SA tự chọn giải pháp · ask: SA đưa phương án ([AF:SA] options), người chọn + xác nhận
+                               # "Sẽ thực hiện" (/do hỏi trong terminal, /run hỏi qua GitHub với label needs_info)
+
 # ── NGƯỜI (GitHub login, để @mention) ────────────────────────────────────────
 people:
   po: []

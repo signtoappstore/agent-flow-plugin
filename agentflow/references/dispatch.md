@@ -8,6 +8,7 @@ Session chính là **orchestrator**: đọc board, chọn agent cho từng ticke
 2. Nạp tool MCP một lần (protocol §3), `get_me` → `my_login`. Fail → dừng: "GitHub MCP chưa connect — `/agentflow:doctor`."
 3. `projects_get method=get_project` một lần. Fail → dừng, gợi `/agentflow:doctor`.
 4. `agentflow-board preflight`, chạy lại ngay trước mỗi lượt spawn → `push: false` ⇒ dừng lượt, không spawn, không ghi lên ticket, báo `push_error` (mạng chặn push / credential). `missing_env` ⇒ nêu ở báo cáo cuối.
+5. Chế độ làm rõ = `clarify.implement` (thiếu ⇒ ask; `${CLAUDE_PLUGIN_ROOT}/references/clarify.md` §Chế độ). Ask ⇒ đọc thêm §Điều phối của file đó.
 
 ## 2. Đọc hàng đợi
 
@@ -42,15 +43,17 @@ Mỗi lượt **một lần**:
 | `in_progress` | `A` + (`changes_requested` hoặc `qc_failed`) | DEV `MODE=rework` | 3 |
 | `in_progress` | `A`, không trong in-flight của session | DEV `MODE=resume` | 3 |
 | `ready` | `A` + `qc_failed` (QC người trả về) | DEV `MODE=rework` | 3 |
-| `ready` | `A` + state thiếu `design` (`issue_read`) | SA `MODE=design` | 4 |
+| `ready` | `A` + state thiếu `design` (`issue_read`), hoặc ask mà `plan` thiếu/`options` | SA `MODE=design` | 4 |
+| `ready` | `A` + ask + `plan: confirm` (người đã gỡ `needs_info`) | người đòi sửa sau `[AF:SA] design` mới nhất → SA `MODE=design`; không → SYS *confirmed* → DEV `MODE=new` | 4 |
 | `ready` | `A` | DEV `MODE=new` | 4 |
 | `ready` | không `A`, không assign người khác | SA `MODE=design` | 5 |
 
-**SYS transition** — orchestrator tự làm theo thứ tự ghi protocol §6. Những cái dẫn tới DEV (*feedback*, *qc-failed*, *requeue*) chỉ chạy khi **sẽ spawn DEV ngay trong cùng bước** (không chạy dưới `--only sa`, không chạy khi đã chạm trần):
+**SYS transition** — orchestrator tự làm theo thứ tự ghi protocol §6. Những cái dẫn tới DEV (*feedback*, *qc-failed*, *requeue*, *confirmed*) chỉ chạy khi **sẽ spawn DEV ngay trong cùng bước** (không chạy dưới `--only sa`, không chạy khi đã chạm trần):
 - *done*: Status → `done`, comment `[AF:SYS] done`, gỡ `qc_manual`; xoá worktree (§7).
 - *feedback*: state `stage: in_progress`, `next: DEV xử lý góp ý trên PR #<m>`; comment `[AF:SYS] feedback`; gắn `changes_requested`, gỡ `qc_manual`; `update_pull_request draft=true` nếu PR chưa draft; Status → `in_progress`. Không tăng round.
 - *qc-manual-pass*: state `stage: ready_to_merge`, `review_round: 0`, `qc_round: 0`; comment `[AF:SYS] qc-manual-pass`; `update_pull_request draft=false` rồi mới gỡ `qc_manual`, `qc_failed` (lỗi giữa chừng còn chạy lại được). Không spawn.
 - *qc-failed*: `qc_round += 1`, trừ khi state đã `stage: ready` (chạy lại sau crash) (vượt `max_qc_rounds` → escalate theo protocol §7 và không spawn DEV); comment `[AF:SYS] qc-failed`; gỡ `qc_manual`, giữ `qc_failed`; state `stage: ready`; Status → `ready`.
+- *confirmed*: state `plan: ok`; comment `[AF:SYS] confirmed` (kế hoạch của `[AF:SA] design @<sha>`); Status giữ `ready`.
 - *requeue*: state `stage: in_progress`, `next: DEV deploy + chạy flow trên staging`; comment `[AF:SYS] requeue`; gỡ label cũ `deploying` nếu có; Status → `in_progress`.
 
 ## 4. Thứ tự và model
@@ -63,7 +66,7 @@ Model: DEV = `run.models.dev[<Size>]` nếu có, không thì `run.models.dev.def
 
 ```
 Agent(subagent_type="agentflow:<sa|dev>", model=<model>,
-      prompt="REPO: <owner/repo>\nISSUE: #<n>\nITEM_ID: <item_id>\nSTAGE: <stage key, vd in_review, sau SYS transition>\nMODE: <mode của bảng §3, hoặc verify theo §6>\nSIZE: <Size, chỉ DEV, nếu có>")
+      prompt="REPO: <owner/repo>\nISSUE: #<n>\nITEM_ID: <item_id>\nSTAGE: <stage key, vd in_review, sau SYS transition>\nMODE: <mode của bảng §3, hoặc verify theo §6>\nSIZE: <Size, chỉ DEV, nếu có>\nCLARIFY: <auto|ask|ask-live, chỉ SA design>")
 ```
 
 - Song song: tối đa `run.parallel` ticket **khác nhau** trong **một** message. Một ticket không bao giờ có 2 agent cùng lúc. Mỗi ticket một worktree (protocol §8).
@@ -73,7 +76,7 @@ Agent(subagent_type="agentflow:<sa|dev>", model=<model>,
 ## 6. Sau mỗi kết quả
 
 1. Đọc khối `RESULT` (bỏ qua narrative). Đọc lại Status bằng `get_project_item` (`field_names: ["Status"]`) — **Status là sự thật**. Không có `RESULT`: thông báo nói agent còn chạy nền ⇒ chờ thông báo kế. Đã dừng hẳn (`maxTurns`, chết giữa chừng) ⇒ `SendMessage` (ToolSearch) cho chính agent đó **một lần** "làm nốt, kết thúc bằng khối RESULT" (tính một spawn); vẫn không có ⇒ gắn `blocked`, comment `[AF:SYS] stuck — <agent> dừng không có RESULT, ticket ở <stage>`, journal `tool_error`, dừng ticket.
-2. RESULT ≠ `ok`, `verify` (`waiting_human`, `needs_info`, `blocked`, `escalated`, `abort`) → **dừng ticket**, đếm là 1 ticket xong.
+2. RESULT ≠ `ok`, `verify` (`decide`: `/do` ask làm theo `clarify.md` §Điều phối; `waiting_human`, `needs_info`, `blocked`, `escalated`, `abort`) → **dừng ticket**, đếm là 1 ticket xong.
 3. RESULT `ok` + tới `ready_to_merge` → dừng ticket, đếm 1. RESULT `verify` (DEV đã code + deploy, Status vẫn `in_progress`) → spawn ngay DEV `MODE=verify`, `STAGE: in_progress` cho ticket đó (context mới); `verify` hai lần liền ⇒ như no-progress (5).
 4. RESULT `ok` + stage mới do agent sở hữu → **đi tiếp ngay ticket đó** ở lượt spawn kế (chain SA design → DEV → SA review; SA ❌ → DEV `MODE=rework` → SA …). Ticket ở `ready`: đọc state rồi chọn dòng §3.
 5. **No-progress guard** (chỉ khi RESULT `ok`): Status không đổi → không spawn lại (SA design giữ `ready` là đúng; thay vào đó: sau SA design state phải có `design` và ticket mang `labels.agent`): gắn `blocked`, comment `[AF:SYS] stuck — <agent> báo ok nhưng ticket vẫn ở <stage>`, journal `tool_error`, dừng ticket.

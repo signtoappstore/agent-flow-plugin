@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: sa-ask-options
+description: SA ở chế độ ask gặp điểm mơ hồ — đưa phương án cho người chọn, chưa thiết kế, chưa nhận ticket
+tags: [agent]
+context:
+  scaffold_script: fixture.sh

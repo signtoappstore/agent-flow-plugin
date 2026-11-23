@@ -21,7 +21,9 @@ HOME_SECRETS = (".ssh/", ".aws/credentials", ".config/gh/hosts.yml", ".claude/.c
 STAGES = ["backlog", "ready", "in_progress", "in_review", "in_qc", "ready_to_merge", "done"]
 LABEL_KEYS = ["agent", "blocked", "needs_info", "changes_requested", "qc_failed", "qc_manual"]
 TOP_KEYS = {"schema", "lang", "board", "classify", "types", "labels", "git", "surfaces", "e2e_map", "forbidden", "design", "staging",
-            "people", "run", "notify"}
+            "clarify", "people", "run", "notify"}
+CLARIFY_GATES = ("task", "implement")
+CLARIFY_MODES = ("ask", "auto")
 NOTIFY_EVENTS = {"blocked", "needs_info", "qc_manual", "ready_to_merge"}
 SECRET_VALUE = re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|\b\d{8,10}:[A-Za-z0-9_-]{35}\b"
                           r"|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAKIA[0-9A-Z]{16}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----")
@@ -266,6 +268,20 @@ def settings_key_locked(key, value):
     return head == "enabledPlugins" and "agentflow" in key and str(value).strip().lower() == "false"
 
 
+def _check_clarify(clarify, fail, warn):
+    """`clarify` is optional: a missing gate falls back to ask (references/clarify.md)."""
+    if clarify is None:
+        return
+    if not isinstance(clarify, dict):
+        fail("clarify phải là map, vd {task: ask, implement: ask}")
+        return
+    for gate, mode in clarify.items():
+        if gate not in CLARIFY_GATES:
+            warn("clarify.%s lạ — plugin chỉ đọc %s" % (gate, ", ".join(CLARIFY_GATES)))
+        elif mode not in CLARIFY_MODES:
+            fail("clarify.%s phải là ask hoặc auto (đang là %r)" % (gate, mode))
+
+
 def validate_config(cfg):
     """Shape problems of a parsed agentflow.yaml, no network: list of (level, message), level ∈ fail | warn."""
     out = []
@@ -334,6 +350,7 @@ def validate_config(cfg):
     skip = (cfg.get("staging") or {}).get("skip_checks")
     if skip is not None and not all(isinstance(x, str) and x for x in as_list(skip)):
         fail("staging.skip_checks phải là danh sách tên check (glob), vd [\"distribute-mobile*\"]")
+    _check_clarify(cfg.get("clarify"), fail, warn)
     models = (cfg.get("run") or {}).get("models") or {}
     if not isinstance(models.get("dev") or {}, dict) or not (models.get("dev") or {}).get("default"):
         fail("run.models.dev.default chưa khai báo")

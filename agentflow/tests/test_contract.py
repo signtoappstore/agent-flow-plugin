@@ -20,18 +20,20 @@ import afconfig  # noqa: E402
 # 3.0 folded the QC agent into DEV: dev.md and automation.md grew, protocol.md and dispatch.md shrank, qc.md is gone.
 # 3.5 (SA regression list, DEV verify spawn, detached runs under the 180 s harness cut) added ~1.4k across five files: a
 # few hundred tokens a spawn against ~20M tokens of late, full-context test turns per ticket (DESIGN-NOTES.md).
+# 3.6 (clarify auto · ask) keeps the mechanics in references/clarify.md, read only by /task, an ask-mode orchestrator and an
+# ask-mode SA design: ~0.3k a spawn for the CLARIFY input, the ambiguity rule and the new heads/state key/RESULT value.
 BUDGETS = {
-    "agents/sa.md": 9500, "agents/dev.md": 12450,
-    "references/protocol.md": 12350, "references/dispatch.md": 8400, "references/design.md": 2600, "references/automation.md": 6800,
-    "references/engineering.md": 2850,
-    "skills/init/SKILL.md": 10650, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 2400, "skills/doctor/SKILL.md": 2000,
-    "skills/run/SKILL.md": 2300, "skills/status/SKILL.md": 2850, "skills/task/SKILL.md": 9400, "skills/init/references/board-setup.md": 4850,
+    "agents/sa.md": 9900, "agents/dev.md": 12450,
+    "references/protocol.md": 12700, "references/dispatch.md": 9000, "references/design.md": 2600, "references/automation.md": 6800,
+    "references/engineering.md": 2850, "references/clarify.md": 6650,
+    "skills/init/SKILL.md": 10650, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 2800, "skills/doctor/SKILL.md": 2000,
+    "skills/run/SKILL.md": 2400, "skills/status/SKILL.md": 2850, "skills/task/SKILL.md": 9600, "skills/init/references/board-setup.md": 4850,
 }
 # What a spawn reads before it looks at the ticket: its prompt, the protocol and the references it always reads.
 # 2.x DEV paid 9.3k + 12.1k + 8.3k (it read the reviewer prompt to self-review); the shared engineering.md replaced that.
 # 3.0 happy path: SA design + DEV + SA review ≈ 24k + 33.4k + 24k, where the QC plan + verify spawns cost 2 × 27.7k more.
 SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"]}
-PER_SPAWN_LIMIT = {"sa": 24700, "dev": 34400}
+PER_SPAWN_LIMIT = {"sa": 25400, "dev": 34750}
 DESCRIPTION_LIMIT = 700
 
 
@@ -264,7 +266,7 @@ class References(unittest.TestCase):
                 self.assertIn('"%s"' % sub, journal, rel)
 
     def test_config_keys_exist(self):
-        sections = ("git", "staging", "run", "notify", "design", "labels", "people", "board")
+        sections = ("git", "staging", "run", "notify", "design", "labels", "people", "board", "clarify")
         for rel in prompts():
             text = re.sub(r"`[^`]*\.(md|py|json|yaml|yml)\b[^`]*`", "", read(rel))
             for section, key in re.findall(r"(?<![\w./-])(%s)\.([a-z_]+)(?![\w-]*\.(?:md|py|json|com))\b" % "|".join(sections), text):
@@ -379,6 +381,17 @@ class StateMachine(unittest.TestCase):
         ("references/dispatch.md", r"trừ khi state đã `stage: ready` \(chạy lại sau crash\)", "chạy lại qc-failed không tăng round hai lần"),
         ("references/automation.md", r"QC tay \*\*luôn\*\* có `- \[ \] Xác nhận lại lỗi QC đã báo", "QC người báo fail thì kiểm lại trước merge (người dùng chọn)"),
         ("agents/sa.md", r"`qc_round` > 0 mà QC tay thiếu mục xác nhận lại", "SA không cho rework sau QC fail bỏ qua QC người"),
+        # 3.6: làm rõ yêu cầu trước khi tạo task / implement — auto tự chọn có căn cứ, ask cho người chọn rồi xác nhận
+        ("agents/sa.md", r"`CLARIFY: auto` ⇒ tự chọn.*căn cứ", "auto: SA tự quyết điểm mơ hồ và ghi căn cứ"),
+        ("agents/sa.md", r"`ask`/`ask-live` ⇒ làm theo `\$\{CLAUDE_PLUGIN_ROOT\}/references/clarify.md` §SA", "ask: SA đưa phương án thay vì tự chọn"),
+        ("references/clarify.md", r"\*\*không\*\* gắn `labels.agent`", "options chưa trả lời thì DEV không nhận ticket"),
+        ("references/clarify.md", r"Cả hai gắn `needs_info` khi chờ người", "/do đứt giữa chừng thì /run không tự cho DEV làm"),
+        ("references/clarify.md", r"Chưa xác nhận ⇒ không ghi ticket, DEV không bắt đầu", "ask: không làm khi người chưa xác nhận"),
+        ("references/clarify.md", r"Cổng Ready \(§6\) vẫn hỏi PO", "auto /task vẫn không tự đưa ticket ra khỏi Backlog"),
+        ("references/clarify.md", r"\"Dừng ở đây\" ⇒ giữ \(thiếu thì gắn\) `needs_info`", "dừng ở cổng xác nhận thì /run không tự cho DEV làm"),
+        ("references/dispatch.md", r"ask mà `plan` thiếu/`options` \| SA `MODE=design`", "ask: ticket đã thiết kế bằng auto vẫn qua cổng xác nhận"),
+        ("references/dispatch.md", r"`plan: confirm`.*SYS \*confirmed\* → DEV `MODE=new`", "ask: DEV chỉ bắt đầu sau xác nhận"),
+        ("skills/do/SKILL.md", r"trừ cổng ask ở điểm 8", "/do được hỏi ở cổng ask"),
     ]
 
     def test_rules_still_stated(self):
@@ -431,7 +444,7 @@ class RealGitHubMcp(unittest.TestCase):
 
 
 class Evals(unittest.TestCase):
-    CASES = ["guard-force-push", "guard-secret-read", "sa-dor-missing-ac", "sa-escalates", "sa-rejects"]
+    CASES = ["guard-force-push", "guard-secret-read", "sa-ask-options", "sa-dor-missing-ac", "sa-escalates", "sa-rejects"]
 
     def graders(self):
         for path in glob.glob(os.path.join(ROOT, "evals", "*", "graders", "*.md")):

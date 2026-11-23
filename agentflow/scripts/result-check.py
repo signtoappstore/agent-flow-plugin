@@ -10,8 +10,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import afconfig  # noqa: E402
 
-RESULT = re.compile(r"^RESULT:\s*(\S+)\s*·\s*(ok|verify|waiting_human|needs_info|blocked|escalated|abort)\s*$", re.M)
-HINT = "Kết thúc bằng đúng khối protocol §13: `RESULT: <stage hiện tại> · <ok|verify|waiting_human|needs_info|blocked|escalated|abort>`, `PR: #<m> @<sha>` (nếu có), `NOTE: …`."
+RESULT = re.compile(r"^RESULT:\s*(\S+)\s*·\s*(ok|verify|decide|waiting_human|needs_info|blocked|escalated|abort)\s*$", re.M)
+HINT = "Kết thúc bằng đúng khối protocol §13: `RESULT: <stage hiện tại> · <ok|verify|decide|waiting_human|needs_info|blocked|escalated|abort>`, `PR: #<m> @<sha>` (nếu có), `NOTE: …`."
 
 
 def verdict(data):

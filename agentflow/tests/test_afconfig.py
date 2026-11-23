@@ -103,6 +103,8 @@ class Validate(unittest.TestCase):
             (lambda c: c.update(surfaces={"app": {"path": "mobile/", "install": ["flutter", "install"]}}), "surfaces.app.install"),
             (lambda c: c["run"].update(max_test_rounds=0), "run.max_test_rounds"),
             (lambda c: c["staging"].update(skip_checks=[""]), "staging.skip_checks"),
+            (lambda c: c["clarify"].update(implement="manual"), "clarify.implement"),
+            (lambda c: c.update(clarify="ask"), "clarify phải là map"),
         ]
         for change, needle in cases:
             cfg = filled_config()
@@ -117,6 +119,15 @@ class Validate(unittest.TestCase):
         warns = [m for level, m in afconfig.validate_config(cfg) if level == "warn"]
         self.assertTrue(any("oops" in m for m in warns))
         self.assertTrue(any("git.protected" in m for m in warns))
+
+    def test_clarify_is_optional_and_unknown_gate_only_warns(self):
+        cfg = filled_config()
+        del cfg["clarify"]
+        self.assertEqual(self.problems(cfg), [])
+        cfg["clarify"] = {"task": "auto", "implement": "ask", "review": "ask"}
+        self.assertEqual(self.problems(cfg), [])
+        warns = [m for level, m in afconfig.validate_config(cfg) if level == "warn"]
+        self.assertTrue(any("clarify.review" in m for m in warns))
 
     def test_legacy_e2e_ci_only_warns(self):
         cfg = filled_config()

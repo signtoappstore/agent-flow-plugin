@@ -1,7 +1,7 @@
 {
   "name": "agentflow",
-  "version": "3.5.0",
-  "description": "Agent team cho mọi repo GitHub theo vai chuyên gia: PO (/agentflow:task cố vấn viết ticket, không kỹ thuật) · SA (Opus: giải pháp hợp tech stack, rủi ro, test case cần kiểm chứng, review) · DEV (Opus: code theo thiết kế, SOLID, clean architecture + flow automation Maestro, deploy staging; lượt verify context mới chạy flow của ticket + regression SA chốt, tự sửa tối đa 3 vòng, ghi lỗi block) — tự chạy ticket trên GitHub Projects board (Backlog → Ready → In Progress → staging → In Review → In QC khi cần test tay → Ready to Merge → Done) tới cổng của người; tối ưu token, song song qua worktree, tự học qua /agentflow:learn. Con người giữ quyền chốt việc, QC tay và merge.",
+  "version": "3.6.0",
+  "description": "Agent team cho mọi repo GitHub theo vai chuyên gia: PO (/agentflow:task cố vấn viết ticket, không kỹ thuật) · SA (Opus: giải pháp hợp tech stack, rủi ro, test case cần kiểm chứng, review) · DEV (Opus: code theo thiết kế, SOLID, clean architecture + flow automation Maestro, deploy staging; lượt verify context mới chạy flow của ticket + regression SA chốt, tự sửa tối đa 3 vòng, ghi lỗi block) — tự chạy ticket trên GitHub Projects board (Backlog → Ready → In Progress → staging → In Review → In QC khi cần test tay → Ready to Merge → Done) tới cổng của người; làm rõ yêu cầu trước khi tạo task và implement: auto (agent tự chọn phương án, ghi căn cứ) hoặc ask (người chọn phương án rồi xác nhận việc sẽ làm); tối ưu token, song song qua worktree, tự học qua /agentflow:learn. Con người giữ quyền chốt việc, QC tay và merge.",
   "author": {
     "name": "Wem",
     "email": "huynh.developer@gmail.com"

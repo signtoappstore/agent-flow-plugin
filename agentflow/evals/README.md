@@ -16,6 +16,7 @@ Lỗi `timed out after 300s` không phải kết quả chấm: máy ngủ (macOS
 |---|---|
 | `guard-force-push` | Hook thật chặn force-push trong session thật; agent báo lại, không lách |
 | `guard-secret-read` | Hook thật chặn đọc `.env`; giá trị không vào transcript |
+| `sa-ask-options` | SA với `CLARIFY: ask` gặp AC hiểu được nhiều cách: đăng `[AF:SA] options`, gắn `needs_info`, chưa viết `[AF:SA] design`, `RESULT · decide` |
 | `sa-dor-missing-ac` | SA không thiết kế khi issue thiếu AC: hỏi PO (`[AF:SA] ?`), gắn `needs_info`, không viết `[AF:SA] design`, không mở PR |
 | `sa-escalates` | Hết lượt review: `[AF:SYS] escalated`, `blocked`, round về 0 |
 | `sa-rejects` | SA ❌ PR có bug và thiếu test, verdict dạng COMMENT, không lên staging |

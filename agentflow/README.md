@@ -25,6 +25,7 @@ Backlog ─PO (/task)→ Ready ─SA design: giải pháp + rủi ro + test case
    pass ─→ In Review ─SA review ✅─┬─ PR còn mục QC tay → In QC +qc-manual → QC người tick + kéo card → undraft ─┐
                                     └─ không có → undraft ──────────────────────────────────────────────────────┴→ Ready to Merge ─người merge→ Done
 
+Chế độ ask (SA)     → [AF:SA] options: người chọn phương án → [AF:SA] design có mục "0. Sẽ thực hiện" → người xác nhận → DEV
 SA hỏi PO           → [AF:SA] ? +needs-info, ticket ở Ready chưa ai nhận: PO sửa bằng /agentflow:task #n rồi bỏ label
 Review ❌            → In Progress +changes-requested; DEV sửa, deploy lại, chạy lại flow liên quan rồi giao review phần mới
 QC người fail       → gắn qc-failed + comment → Ready; DEV tái hiện bằng flow, sửa trước việc mới
@@ -48,6 +49,17 @@ e2e_map:
 ```
 
 Tên cột thật của board được map trong `agentflow.yaml` → `board.status`.
+
+### Làm rõ yêu cầu: auto · ask
+
+Hai cổng trước khi làm: **tạo task** (`/agentflow:task`) và **implement** (trước khi DEV code). Mỗi cổng chạy một trong hai chế độ, đọc từ `clarify.task` / `clarify.implement` trong `agentflow.yaml` của repo; thiếu key thì mặc định **ask**.
+
+| | auto | ask |
+|---|---|---|
+| `/agentflow:task` | Không hỏi theo từng mục: agent tự chọn phương án hợp tài liệu sản phẩm và hành vi đang chạy nhất, ghi mỗi quyết định kèm căn cứ vào section **Giả định (agent tự chọn)** của ticket. Vẫn hỏi bạn trước khi chuyển Ready | Hỏi bạn từng điểm mở, đưa các hướng sản phẩm kèm được/mất để bạn chọn, rồi in **Sẽ thực hiện** (issue nào tạo/sửa, type, số AC, field, cha/sub, liên kết) để bạn xác nhận trước khi ghi lên GitHub |
+| Implement | SA tự chọn giải pháp tốt nhất và hợp stack nhất, quyết luôn điểm mơ hồ, ghi `mơ hồ → đã chọn → căn cứ` trong `[AF:SA] design` | SA đăng `[AF:SA] options` (≤ 4 điểm cần chọn, phương án đề xuất đứng đầu) → bạn chọn → SA viết thiết kế có mục **0. Sẽ thực hiện** → bạn xác nhận → DEV mới bắt đầu. `/agentflow:do` hỏi ngay trong terminal; `/agentflow:run` hỏi qua GitHub: ticket mang `needs-info`, bạn trả lời `1A 2B` (hoặc `OK` = theo mọi đề xuất) rồi bỏ label, lần sau bỏ label lần nữa để xác nhận kế hoạch |
+
+DoR vẫn chặn ở cả hai chế độ (thiếu AC, AC mâu thuẫn, Size phải tách, bị chặn, thiếu input không suy ra được).
 
 ## Yêu cầu
 
@@ -95,7 +107,7 @@ claude plugin enable  agentflow@agent-flow-plugins --scope local
 | Lệnh | Việc |
 |---|---|
 | `/agentflow:init` | Wizard: token + scope, link board có sẵn (map cột, thêm cột thiếu mà **không mất card**) hoặc tạo board theo preset, label, issue type, issue form + PR template, convention git + lệnh check đọc từ repo, Figma, Telegram, people, permission mode; smoke test |
-| `/agentflow:task <mô tả>` | **PO**: expert PO cố vấn tới khi ticket đủ — vấn đề → giá trị và đo thành công → người dùng → phạm vi → AC → luật nghiệp vụ, trường hợp biên; nắm sản phẩm qua tài liệu thiết kế (`design.repo`, đọc đúng mục), Figma, ảnh, tìm issue trùng, **không đọc code**; mọi ý trong ticket do PO nói hoặc xác nhận, viết bằng ngôn ngữ sản phẩm, chỉ dẫn tài liệu khi cần; PO nói bằng giải pháp thì đổi thành nhu cầu. Chấm chất lượng (vấn đề, giá trị, AC kiểm được, đường lỗi, phạm vi, không giải pháp kỹ thuật, cỡ) trước khi ghi vào **Backlog**. Đạt cổng Ready (AC kiểm được, Priority, Size, Platform, assignee, milestone nếu repo có) thì hỏi PO chuyển **Ready**, rồi hỏi chạy `/agentflow:do`. Việc lớn hay nhiều việc: hỏi PO chọn 1 ticket, issue cha + sub-issue (tách theo lát giá trị) hay ticket độc lập — không tự quyết. `#n` = hoàn thiện issue ở Backlog, hoặc ở Ready khi DEV chưa nhận (kể cả needs-info) |
+| `/agentflow:task <mô tả>` | **PO**: expert PO cố vấn tới khi ticket đủ — vấn đề → giá trị và đo thành công → người dùng → phạm vi → AC → luật nghiệp vụ, trường hợp biên; nắm sản phẩm qua tài liệu thiết kế (`design.repo`, đọc đúng mục), Figma, ảnh, tìm issue trùng, **không đọc code**; mọi ý trong ticket do PO nói hoặc xác nhận, viết bằng ngôn ngữ sản phẩm, chỉ dẫn tài liệu khi cần; PO nói bằng giải pháp thì đổi thành nhu cầu. Chấm chất lượng (vấn đề, giá trị, AC kiểm được, đường lỗi, phạm vi, không giải pháp kỹ thuật, cỡ) trước khi ghi vào **Backlog**. Đạt cổng Ready (AC kiểm được, Priority, Size, Platform, assignee, milestone nếu repo có) thì hỏi PO chuyển **Ready**, rồi hỏi chạy `/agentflow:do`. Việc lớn hay nhiều việc: hỏi PO chọn 1 ticket, issue cha + sub-issue (tách theo lát giá trị) hay ticket độc lập (chế độ auto: tự chọn theo cùng dấu hiệu). `#n` = hoàn thiện issue ở Backlog, hoặc ở Ready khi DEV chưa nhận (kể cả needs-info) |
 | `/agentflow:do #n` | Xử lý **một** ticket qua SA design → DEV (code + flow, deploy staging, chạy flow, tự sửa) → SA review, tới cổng của người |
 | `/agentflow:run` | Chạy **cả hàng đợi**: việc dở trước (feedback → QC người fail → review → rework), rồi Ready theo Priority (DEV nhận việc đã thiết kế trước khi SA thiết kế việc mới); `--only sa` để SA thiết kế trước cả hàng Ready; song song `run.parallel` ticket; dừng khi hết việc hoặc đủ `run.max_tasks`. Chạy định kỳ: `/loop 30m /agentflow:run` |
 | `/agentflow:status` | Đếm theo stage, việc chờ người, bất thường. `--metrics`: cycle time, first-pass yield, số lần fail, aging + thống kê journal |
@@ -112,6 +124,7 @@ claude plugin enable  agentflow@agent-flow-plugins --scope local
 | `references/protocol.md` | Contract chung: stage, label, board call, state block, comment `[AF:…]`, thứ tự ghi, git, token hygiene, journal |
 | `references/dispatch.md` | Orchestrator: hàng đợi, bảng hành động, model, song song, no-progress guard |
 | `references/design.md` | Figma / design trong repo — chỉ load khi ticket chạm UI |
+| `references/clarify.md` | Làm rõ yêu cầu auto · ask: `/agentflow:task`, orchestrator và SA design chỉ đọc khi cần (task luôn đọc; implement chỉ ở chế độ ask) |
 | `references/automation.md` | Test case từ yêu cầu + rủi ro, quy ước element id theo nền tảng, cách viết flow (Maestro trước, mobile và web, thao tác như người dùng), chọn flow liên quan, chạy trên staging, phân định fail, ảnh chỉ khi cần, mục Kiểm chứng lại — DEV đọc khi có test case e2e/api |
 | `skills/*` | 7 lệnh (`disable-model-invocation` — không tốn context khi không gọi) |
 | `hooks/hooks.json` + `scripts/guard.py` · `shellparse.py` | Hook chặn (best-effort, xem §Chạy không cần bạn), kể cả qua lệnh bọc (`bash -c`, `env`, `timeout`, `$(…)`, `xargs`, `eval`, code Python/Node): merge/approve PR, dispatch workflow, force-push, xoá nhánh remote, xoá repo/package, push nhánh protected/base, đọc/sửa/in path `forbidden`, token trong tham số. Thêm luật theo role: SA chỉ đọc (không sửa file, không push, không đổi git); DEV chỉ ghi trong worktree `af-<n>` và worktree staging `af-<n>-staging`, push staging chỉ từ worktree staging và worktree đó chỉ push vào staging, không đưa staging vào nhánh ticket (merge, reset, restore, push `origin/staging:<nhánh>`), không `update-ref`/`read-tree`/`git branch` ghi, không `pull` ngoài worktree, không undraft |

@@ -16,8 +16,9 @@ Bạn là **orchestrator cho đúng một ticket**: `$ARGUMENTS`. Đọc `${CLAU
 5. **`blocked` / `needs_info`** → đọc comment chặn mới nhất, trình cho người: đã trả lời chưa? Người xác nhận đã gỡ → bỏ label rồi chạy tiếp; không thì dừng.
 6. **`ready_to_merge`** → áp bảng dispatch §3 như thường (PR đã merge → *done*, QC người đã pass → *qc-manual-pass*, feedback → rework). Rơi vào dòng "chờ người merge" → báo, in link PR, dừng. Không bao giờ merge.
 7. `--model` → ghi đè model của DEV cho ticket này.
+8. **Chế độ ask** (`clarify.implement`, mặc định) → SA design nhận `CLARIFY: ask-live`; RESULT `decide` hay ticket `needs_info` có state `plan: options|confirm` → cổng trong terminal theo `${CLAUDE_PLUGIN_ROOT}/references/clarify.md` §Điều phối: người chọn phương án, rồi xác nhận Sẽ thực hiện, DEV mới bắt đầu.
 
-Người dùng đang ngồi trước terminal: được hỏi **tối đa một câu** ở các điểm 2–5 trên. Sau khi bắt đầu chain thì không hỏi nữa.
+Người dùng đang ngồi trước terminal: được hỏi **tối đa một câu** ở các điểm 2–5 trên. Sau khi bắt đầu chain thì không hỏi nữa, trừ cổng ask ở điểm 8 (trước khi DEV code).
 
 ## Báo cáo
 
