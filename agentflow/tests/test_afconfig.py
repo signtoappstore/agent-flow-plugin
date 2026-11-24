@@ -109,6 +109,9 @@ class Validate(unittest.TestCase):
             (lambda c: c["staging"].update(workflows={"file": "x.yml"}), "staging.workflows phải là danh sách"),
             (lambda c: c["staging"].update(workflows=[{"file": "../deploy.yml", "when": "push"}]), "staging.workflows[0].file"),
             (lambda c: c["staging"].update(workflows=[{"file": "deploy.yml", "when": "always"}]), "staging.workflows[0].when"),
+            (lambda c: c["staging"].update(workflows=[{"file": "deploy.yml", "when": "push", "wipe": "a b"}]), "staging.workflows[0].wipe"),
+            (lambda c: c["staging"].update(workflows=[{"file": "deploy.yml", "when": "push", "wipe": "reset", "inputs": {"reset": True}}]), "vừa ở wipe vừa ở inputs"),
+            (lambda c: c["staging"].update(skip_ci="yes"), "staging.skip_ci"),
             (lambda c: c["staging"].update(workflows=[{"file": "d.yml", "when": "push"}, {"file": "d.yml", "when": "need"}]), "khai hai lần"),
             (lambda c: c["staging"].update(workflows=[{"file": "d.yml", "when": "push", "inputs": {"a": [1]}}]), "inputs"),
         ]
@@ -137,6 +140,12 @@ class Validate(unittest.TestCase):
         self.assertTrue(any("surfaces.site.platform" in m for m in warns), warns)
         self.assertFalse(any("surfaces.app" in m for m in warns), warns)
         self.assertEqual([w["file"] for w in afconfig.staging_workflows(cfg)], ["deploy-staging.yml", "apk.yaml"])
+        self.assertEqual([w["wipe"] for w in afconfig.staging_workflows(cfg)], [None, None])
+        self.assertTrue(afconfig.staging_skip_ci(cfg))
+        cfg["staging"]["skip_ci"] = False
+        self.assertFalse(afconfig.staging_skip_ci(cfg))
+        cfg["staging"].update(skip_ci=True, workflows=[{"file": "seed.yml", "when": "need"}])
+        self.assertFalse(afconfig.staging_skip_ci(cfg), "không có workflow when: push thì [skip ci] sẽ không deploy gì")
         self.assertIn("platform:backend", afconfig.label_names(cfg))
         del cfg["labels"]["platform"]
         self.assertTrue(any("labels.platform chưa khai" in m for level, m in afconfig.validate_config(cfg)))

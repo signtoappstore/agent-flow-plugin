@@ -41,9 +41,9 @@ Review ❌ liên tiếp > 3 hoặc QC người fail > 2 → +blocked + [AF:SYS] 
 
 PR có mục **Kiểm chứng lại**: *QC tay* (chặn merge — case không tự động được) và *Đề xuất kiểm chứng thêm* (regression ở vùng rủi ro SA nêu và phần diff chạm mà flow không phủ — không chặn).
 
-Nhánh staging (`staging.branch`, bắt buộc) chỉ để build test: DEV merge dồn nhánh ticket vào đó (từ worktree tạm, hook kiểm), không reset, không force-push, không merge ngược về PR hay master. Vì vậy trên staging có thể có code chưa đạt của ticket khác; nhánh lệch nhiều thì bạn tự reset. Job release mobile (TestFlight, Firebase…) khai ở `staging.skip_checks` để DEV không chờ; flow mobile chạy trên emulator với bản build trỏ server staging (`surfaces.<key>.install`), chỉ build lại khi code mobile đổi.
+Nhánh staging (`staging.branch`, bắt buộc) chỉ để build test: DEV merge dồn nhánh ticket vào đó (từ worktree tạm, hook kiểm), không reset, không force-push, không merge ngược về PR hay master. Vì vậy trên staging có thể có code chưa đạt của ticket khác; nhánh lệch nhiều thì bạn tự reset. Mặc định không build/distribute mobile trên CI: DEV không dispatch các workflow đó (bạn chạy tay khi cần), job release mobile còn chạy thì khai ở `staging.skip_checks` để DEV không chờ; flow mobile chạy trên emulator với bản DEV build trên máy, trỏ server staging (`surfaces.<key>.install`), chỉ build lại khi code mobile đổi.
 
-**Workflow trên staging — DEV tự làm, không hỏi bạn**: sau mỗi lần push staging, DEV huỷ run cũ còn chạy trên staging, dispatch các workflow khai `when: push` trong `staging.workflows` (pipeline chỉ chạy tay), dispatch `when: need` khi cần (vd build app staging); check fail do hạ tầng/flaky thì rerun job fail, tối đa 2 lần mỗi run, rồi mới `blocked`. Mọi thao tác đi qua `agentflow-board dispatch|rerun|cancel`: ref luôn là `staging.branch`, inputs chỉ lấy từ config, workflow ngoài danh sách và run của nhánh khác bị từ chối; `gh workflow run`, `gh run rerun|cancel`, REST và MCP trực tiếp vẫn bị hook chặn. Push nhánh ticket và staging vốn không cần bạn duyệt (khi đã có allow rule, xem §Chạy không cần bạn).
+**Workflow trên staging — DEV tự làm, không hỏi bạn**: merge commit DEV push lên staging có `[skip ci]` (`staging.skip_ci`, mặc định bật; chỉ có tác dụng khi có workflow `when: push`) nên workflow `on: push` không tự chạy. Sau mỗi lần push, DEV huỷ run cũ còn chạy trên staging, dispatch các workflow khai `when: push` trong `staging.workflows`, dispatch `when: need` khi cần (vd seed riêng); check fail do hạ tầng/flaky thì rerun job fail, tối đa 2 lần mỗi run, rồi mới `blocked`. Mọi thao tác đi qua `agentflow-board dispatch|rerun|cancel`: ref luôn là `staging.branch`, inputs chỉ lấy từ config, workflow ngoài danh sách và run của nhánh khác bị từ chối; `gh workflow run`, `gh run rerun|cancel`, REST và MCP trực tiếp vẫn bị hook chặn. Push nhánh ticket và staging vốn không cần bạn duyệt (khi đã có allow rule, xem §Chạy không cần bạn).
 
 ```yaml
 staging:
@@ -51,7 +51,10 @@ staging:
     - file: deploy-staging.yml
       when: push                 # push | need
       inputs: { env: staging }   # tuỳ chọn, cố định
+      wipe: wipe_data            # tuỳ chọn: input boolean xoá dữ liệu staging, DEV tự bật khi cần
 ```
+
+**Wipe dữ liệu staging — DEV tự quyết**: workflow khai `wipe` thì mỗi lần dispatch DEV đặt input đó `false`, trừ khi ticket cần dữ liệu sạch (migration không hợp dữ liệu cũ, seed đổi mà flow dựa vào, dữ liệu bẩn không phải của ticket làm flow sai và tự dọn không hết) thì `agentflow-board dispatch … --wipe --issue <n>` và ghi lý do vào comment `[AF:DEV]`. Lệnh từ chối (exit 5) khi ticket khác của repo đang In QC (người đang test tay) hoặc đang chạy flow trên máy này; khi đó DEV deploy không wipe, bắt buộc phải wipe thì `blocked` hỏi bạn. Run có wipe không bị `cancel` của ticket push sau huỷ (trong 1 giờ).
 
 **Nền tảng** (mobile, web, backend) là label `labels.platform`, một ticket gắn được nhiều label: `/agentflow:task` gợi ý theo nơi người dùng dùng, PO chốt; SA thêm khi thiết kế chạm nền tảng khác (thường là backend). Board bản cũ có field Platform: `/agentflow:init` chuyển giá trị sang label (`agentflow-board platform-migrate`) rồi xoá field khi bạn duyệt.
 
@@ -103,7 +106,7 @@ Audit chỉ đọc repo và GitHub (hook chặn ghi, push, đổi git, workflow;
 |---|---|
 | Claude Code ≥ 2.1.295 | plugin dùng skills, `bin/`, hooks `onFailure` (đã test trên 2.1.314) |
 | `git`, `python3` ≥ 3.9, `jq` | `jq` cho `/agentflow:learn` và init |
-| Nhánh staging + pipeline | Push vào staging phải chạy pipeline và báo check về commit (GitHub Actions hoặc CI ngoài có commit status) |
+| Nhánh staging + pipeline | Deploy staging phải báo check về commit (GitHub Actions hoặc CI ngoài có commit status). Workflow khai `staging.workflows` cần trigger `workflow_dispatch`; có workflow `when: push` thì push staging mang `[skip ci]`, CI ngoài GitHub Actions (Vercel, CircleCI…) tự xử lý `[skip ci]` theo luật của nó |
 | GitHub CLI `gh` đã đăng nhập, token **full scope** | Plugin dùng token của `gh`, không lưu bản sao. Token **bắt buộc có mọi scope** của classic token (`repo`, `workflow`, `admin:org`, `project`, `delete_repo`, `admin:enterprise`, … — danh sách gốc: `FULL_SCOPES` trong `bin/agentflow-board`); thiếu scope nào thì `whoami`/`doctor` ✗. `agentflow-board whoami` in đúng lệnh cần chạy: `gh auth login -h github.com -s <mọi scope>` hoặc `gh auth refresh -h github.com -s <scope thiếu>`. GitHub không cấp đủ qua `gh` thì tạo [classic token](https://github.com/settings/tokens/new) tick mọi ô rồi `gh auth login -h github.com --with-token` |
 | Maestro (khuyến nghị) | DEV viết và chạy flow để test UI mobile và web như người dùng: `curl -fsSL https://get.maestro.mobile.dev \| bash`, `maestro` phải nằm trong PATH; mobile cần emulator/simulator đang chạy. `/agentflow:doctor` báo khi thiếu |
 | Figma (tuỳ chọn) | MCP chính thức, OAuth: `/mcp` → figma → Authenticate |

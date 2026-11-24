@@ -66,20 +66,21 @@ WT=<path của §3>-staging
 git fetch -q origin <staging.branch> <branch>
 git worktree remove --force "$WT" 2>/dev/null || true
 git worktree add -q --detach "$WT" origin/<staging.branch>
-git -C "$WT" merge --no-ff --no-edit origin/<branch> || { echo MERGE_CONFLICT; exit 0; }   # MERGE_CONFLICT ⇒ giữ $WT, xem dưới
+git -C "$WT" merge --no-ff --no-edit -m "af: deploy <branch> [skip ci]" origin/<branch> || { echo MERGE_CONFLICT; exit 0; }   # skip_ci: false / không có when: push ⇒ bỏ [skip ci]; MERGE_CONFLICT ⇒ giữ $WT
 git -C "$WT" push origin HEAD:<staging.branch>   # bị reject ⇒ chạy lại cả khối (tối đa 3 lần)
 git -C "$WT" rev-parse HEAD                      # = deploy_sha
 git worktree remove --force "$WT"
 ```
 
 - **Conflict**: giải trong `$WT` giữ đúng ý cả hai phía (không xoá code của ticket khác), `git add`, `git commit --no-edit`, chạy tiếp từ bước push. Không chắc ⇒ `git merge --abort`, dọn worktree, `[AF:DEV] blocked` + file + nhánh ticket liên quan. Không bao giờ merge staging vào nhánh ticket.
-- Push thành công ⇒ state (chỉ sửa) `deploy_sha`, `deploy_at: <ISO-8601 UTC bây giờ>`. `Already up to date` (staging đã có nhánh) ⇒ giữ hai key cũ.
-- **Workflow staging** — tự làm, không hỏi người, chỉ qua `agentflow-board` (hook chặn lối khác): push thành công ⇒ `agentflow-board cancel <REPO>` (huỷ run cũ đang chạy), rồi `agentflow-board dispatch <REPO> --workflow <file>` cho mỗi mục `staging.workflows` có `when: push`. `when: need` ⇒ dispatch khi cần (vd build app staging khi code mobile đổi), ghi workflow + lý do vào comment `[AF:DEV]` kế tiếp.
+- Push xong ⇒ state (chỉ sửa) `deploy_sha`, `deploy_at: <ISO-8601 UTC bây giờ>`. `Already up to date` (staging đã có nhánh) ⇒ giữ hai key cũ.
+- **Workflow staging** — tự làm, không hỏi, chỉ qua `agentflow-board` (hook chặn lối khác): push xong ⇒ `agentflow-board cancel <REPO>` (run cũ), rồi `agentflow-board dispatch <REPO> --workflow <file>` cho mỗi mục `staging.workflows` có `when: push`. `when: need` ⇒ khi cần, ghi workflow + lý do ở `[AF:DEV]` kế. Không dispatch build/distribute mobile.
+- **Wipe** (mục có `wipe`): thêm `--wipe --issue <n>` khi migration không hợp dữ liệu cũ, seed đổi, hay dữ liệu bẩn ngoài `af-<n>-` làm flow sai — không che lỗi; lý do ở `[AF:DEV]` kế. Exit 5 (ticket khác đang dùng staging) ⇒ dispatch thường; buộc wipe ⇒ `[AF:DEV] blocked`.
 - **Tách lượt**: `MODE` `new`/`rework`, push staging xong và còn flow phải chạy ⇒ state (chỉ sửa) `next: DEV verify trên staging`, `RESULT: in_progress · verify`, dừng — lượt `MODE=verify` làm tiếp. Không có flow ⇒ §8 luôn.
-- **Chờ deploy** khi diff `<test_sha>..origin/<branch>` (thiếu `test_sha`: cả PR) chạm code server/web, kể cả khi merge `Already up to date`; chỉ `e2e_dir` hay mobile ⇒ không chờ:
+- **Chờ deploy** khi có pipeline (đã dispatch hay không [skip ci]), diff `<test_sha>..origin/<branch>` (thiếu `test_sha`: cả PR) chạm code server/web, kể cả khi merge `Already up to date`; chỉ `e2e_dir` hay mobile ⇒ không chờ:
   `agentflow-board checks <REPO> --branch <staging.branch> --contains <deploy_sha> --since <deploy_at> --wait 2.5` + `--skip '<glob>'` cho mỗi mục `staging.skip_checks`, Bash `timeout: 170000` (protocol §9); lặp tới khi hết `pending`; mobile: build + cài trong lúc chờ (`automation.md` §Chạy). `contains: false` ⇒ người reset staging: deploy lại. Chờ quá `staging.timeout_min` trong lượt này ⇒ `[AF:DEV] blocked` pipeline-timeout + sha.
   `failure` ⇒ log: `actions_list method=list_workflow_runs` theo head → `get_job_logs failed_only=true return_content=true tail_lines=200`. Do diff của ticket ⇒ sửa (tính một vòng); do ticket khác (`git log origin/<base>..origin/<staging.branch> --merges --oneline`) hoặc không xác định ⇒ `[AF:DEV] blocked` + check + đoạn log; do hạ tầng/flaky (runner, mạng, tải deps) ⇒ `agentflow-board rerun <REPO>` rồi chờ lại, không tính vòng (≤ 2 lần mỗi run, quá thì `skipped` ⇒ blocked như trên).
-- **Chạy flow liên quan** trên staging theo `automation.md` §Chạy (mobile: build staging cài lên emulator, trỏ server staging).
+- **Chạy flow liên quan** trên staging theo `automation.md` §Chạy (mobile: bản build trỏ staging trên emulator).
 
 **Vòng sửa** — fail ⇒ phân định (`automation.md` §Phân định): do test ⇒ sửa flow / gắn id; do code ⇒ sửa code. Commit, push, deploy lại, chạy lại flow fail + flow liên quan phần vừa sửa. Tối đa `run.max_test_rounds` vòng mỗi lượt; lỗi hạ tầng, ticket khác không tính vòng.
 

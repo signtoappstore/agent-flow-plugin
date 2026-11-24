@@ -24,10 +24,13 @@ Auth: the token `gh` uses ($GH_TOKEN, $GITHUB_TOKEN, else `gh auth token`). Neve
   issue-types --org O [--ensure Name|description ...]
   metrics <board-url> [--days N] [--stages k=v,...] [--parked l1,l2,...]
   checks <owner/repo> --branch B --contains SHA [--since ISO] [--wait MIN] [--skip GLOB]   CI of the branch head; one JSON line
-  dispatch <owner/repo> --workflow FILE     run a workflow of staging.workflows on staging.branch (inputs from the config)
+  dispatch <owner/repo> --workflow FILE [--wipe --issue N]   run a workflow of staging.workflows on staging.branch (inputs
+                                            from the config); --wipe turns on its `wipe` input, refused (exit 5) while
+                                            another ticket is In QC or runs flows on this machine
   rerun <owner/repo> [--run ID]             re-run failed jobs of runs on staging.branch (default: the runs of its head);
                                             at most MAX_RERUNS re-runs per run
-  cancel <owner/repo> [--run ID]            cancel unfinished runs on staging.branch whose commit is not its head
+  cancel <owner/repo> [--run ID]            cancel unfinished runs on staging.branch whose commit is not its head,
+                                            except a run dispatched with --wipe in the last hour
   feedback <owner/repo> --issue N [--issue M ...] [--summary]   people's feedback on the PR of each issue
        (state block `pr`, else the one open PR linked to it); one JSON line per issue
   doctor [--root DIR]                       check agentflow.yaml against GitHub
@@ -39,6 +42,7 @@ import argparse
 import base64
 import datetime as dt
 import fnmatch
+import glob
 import json
 import os
 import re
@@ -681,18 +685,92 @@ def _input_value(value):
     return "" if value is None else str(value)
 
 
+E2E_TMP = os.environ.get("AGENTFLOW_E2E_TMP") or "/tmp"  # where agentflow-e2e keeps its runs
+WIPE_KEEP_SECONDS = 3600  # a wipe run younger than this is not cancelled by another ticket's push
+
+
+def _wipe_marker(slug):
+    return os.path.join(E2E_TMP, "af-wipe-%s.json" % re.sub(r"[^\w.-]+", "_", slug.lower()))
+
+
+def _running_flows(issue):
+    """Other issues with an unfinished agentflow-e2e run on this machine: their flows use staging data right now."""
+    busy = set()
+    for path in glob.glob(os.path.join(E2E_TMP, "af-*-e2e", "*", "state.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                state = json.load(fh)
+            if state.get("done") or str(state.get("issue")) == str(issue) or not state.get("pid"):
+                continue
+            os.kill(int(state["pid"]), 0)
+        except (OSError, ValueError, TypeError):
+            continue
+        busy.add(int(state["issue"]))
+    return sorted(busy)
+
+
+def _staging_users(cfg, slug, issue):
+    """Who would lose data to a wipe: other open tickets of the repo in In QC (a person tests on staging) and other
+    tickets running flows on this machine. → list of {issue, why}."""
+    users = [{"issue": n, "why": "đang chạy flow"} for n in _running_flows(issue)]
+    board = (cfg.get("board") or {}).get("url")
+    in_qc = ((cfg.get("board") or {}).get("status") or {}).get("in_qc")
+    if board and in_qc:
+        for it in iter_items(board, ["Status"]):
+            other = it["number"] != issue and it["number"] not in [u["issue"] for u in users]
+            same_repo = (it["repo"] or "").lower() == slug.lower()
+            testing = it["state"] == "OPEN" and it["fields"].get("Status") == in_qc
+            if other and same_repo and testing:
+                users.append({"issue": it["number"], "why": "In QC — người đang test tay"})
+    return users
+
+
 def cmd_dispatch(a):
     cfg, branch = _staging_scope(a)
     declared = {w["file"]: w for w in afconfig.staging_workflows(cfg)}
     if a.workflow not in declared:
         die("%s không nằm trong staging.workflows (%s) — người khai trong agentflow.yaml" % (a.workflow, ", ".join(declared) or "trống"))
+    wf = declared[a.workflow]
+    if a.wipe and not wf["wipe"]:
+        die("%s không khai wipe trong staging.workflows — không xoá được dữ liệu staging qua workflow này" % a.workflow)
+    if a.wipe and not a.issue:
+        die("--wipe cần --issue <n> (ticket đang deploy)")
+    if a.wipe:
+        users = _staging_users(cfg, a.slug, a.issue)
+        if users:
+            print(json.dumps({"refused": "wipe", "busy": users}, ensure_ascii=False))
+            sys.exit(5)
     body = {"ref": branch}
-    inputs = declared[a.workflow]["inputs"]
+    inputs = {str(k): _input_value(v) for k, v in wf["inputs"].items()}
+    if wf["wipe"]:
+        inputs[wf["wipe"]] = "true" if a.wipe else "false"
     if inputs:
-        body["inputs"] = {str(k): _input_value(v) for k, v in inputs.items()}
+        body["inputs"] = inputs
     http("POST", "/repos/%s/actions/workflows/%s/dispatches" % (a.slug, urllib.parse.quote(a.workflow, safe="")), body)
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    print(json.dumps({"dispatched": a.workflow, "ref": branch, "sha": _staging_head(a.slug, branch), "at": now}, ensure_ascii=False))
+    if a.wipe:
+        with open(_wipe_marker(a.slug), "w", encoding="utf-8") as fh:
+            json.dump({"workflow": a.workflow, "at": now, "issue": a.issue}, fh)
+    out = {"dispatched": a.workflow, "ref": branch, "sha": _staging_head(a.slug, branch), "at": now}
+    if a.wipe:
+        out["wipe"] = True
+    print(json.dumps(out, ensure_ascii=False))
+
+
+def _wipe_run(slug, run):
+    """A run dispatched with --wipe on this machine in the last hour: cancelling it would drop the wipe silently."""
+    try:
+        with open(_wipe_marker(slug), encoding="utf-8") as fh:
+            mark = json.load(fh)
+        at = _iso(mark["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not run.get("created_at"):
+        return False
+    dispatched = run.get("event") == "workflow_dispatch"
+    same_workflow = (run.get("path") or "").endswith("/" + mark["workflow"])
+    age = (_iso(run["created_at"]) - at).total_seconds()
+    return dispatched and same_workflow and -60 <= age <= WIPE_KEEP_SECONDS
 
 
 def cmd_rerun(a):
@@ -716,12 +794,20 @@ def cmd_cancel(a):
     head = _staging_head(a.slug, branch)
     runs = _picked_runs(a, branch, lambda: _branch_runs(a.slug, branch))
     done = []
+    kept = []
     for run in runs:
         if run.get("status") not in RUN_ACTIVE or run.get("head_sha") == head:
             continue
+        row = {"run": run["id"], "name": run.get("name"), "sha": (run.get("head_sha") or "")[:7]}
+        if not a.run and _wipe_run(a.slug, run):
+            kept.append(dict(row, why="run có wipe dữ liệu"))
+            continue
         http("POST", "/repos/%s/actions/runs/%d/cancel" % (a.slug, run["id"]), {})
-        done.append({"run": run["id"], "name": run.get("name"), "sha": (run.get("head_sha") or "")[:7]})
-    print(json.dumps({"cancelled": done, "head": head}, ensure_ascii=False))
+        done.append(row)
+    out = {"cancelled": done, "head": head}
+    if kept:
+        out["kept"] = kept
+    print(json.dumps(out, ensure_ascii=False))
 
 
 TRUSTED = ("OWNER", "MEMBER", "COLLABORATOR")
@@ -871,6 +957,8 @@ def _doctor_workflows(slug, branch, workflows, ok, fail):
             ok("workflow %s (%s) dispatch được trên %s" % (wf["file"], wf["when"], branch))
         else:
             fail("staging.workflows: %s không có trigger workflow_dispatch — DEV không chạy được" % wf["file"])
+        if wf["wipe"] and not re.search(r"^\s+%s\s*:" % re.escape(wf["wipe"]), text, re.M):
+            fail("staging.workflows: %s không có input %s (wipe) — DEV dispatch --wipe sẽ lỗi" % (wf["file"], wf["wipe"]))
 
 
 def _doctor_base(slug, base, ok, warn):
@@ -1083,6 +1171,9 @@ def cmd_doctor(a):
             ok("staging branch %s" % stag)
             _doctor_staging(canonical, stag, ok, warn)
             _doctor_workflows(canonical, stag, afconfig.staging_workflows(cfg), ok, fail)
+            if (cfg.get("staging") or {}).get("skip_ci") is True and not afconfig.staging_skip_ci(cfg):
+                warn("staging.skip_ci: true chưa có tác dụng — chưa khai workflow when: push để DEV dispatch, nên push staging "
+                     "vẫn để CI tự chạy")
         if base:
             _doctor_base(canonical, base, ok, warn)
         if not (cfg.get("staging") or {}).get("url"):
@@ -1140,6 +1231,8 @@ def main():
     s.add_argument("--since", help="deploy_at: check xanh trong 2 phút đầu vẫn tính là pending")
     s.add_argument("--skip", action="append", help="glob tên check không chờ (staging.skip_checks, vd release mobile); lặp được")
     s = sub.add_parser("dispatch"); s.add_argument("slug"); s.add_argument("--workflow", required=True, help="tên file trong staging.workflows")
+    s.add_argument("--wipe", action="store_true", help="bật input wipe của workflow (xoá dữ liệu staging); từ chối khi ticket khác đang dùng staging")
+    s.add_argument("--issue", type=int, help="ticket đang deploy (bắt buộc với --wipe)")
     for name in ("rerun", "cancel"):
         s = sub.add_parser(name); s.add_argument("slug"); s.add_argument("--run", type=int, help="id run trên nhánh staging")
     s = sub.add_parser("feedback"); s.add_argument("slug"); s.add_argument("--issue", type=int, action="append", required=True)

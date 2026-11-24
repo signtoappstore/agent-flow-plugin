@@ -36,6 +36,9 @@ import afconfig  # noqa: E402
 # #44 was spawned as soon as #43 came back while #42 still ran; the flag keeps it so where the default differs.
 # 3.9 (/agentflow:checklist) adds files no ticket spawn reads: the command, the audit agent and one reference per lens,
 # read only when a person asks for an audit. SA and DEV spawns cost the same as before.
+# 3.10 ([skip ci] on the staging merge, pipelines only by dispatch, DEV-chosen wipe of staging data, no CI mobile build) adds
+# ~0.33k to a DEV spawn, dev.md trimmed to stay in its own budget: a wipe refused while staging is in use spares a person's
+# QC data, and skipping push pipelines + mobile builds saves runner time on every deploy.
 BUDGETS = {
     "agents/sa.md": 10100, "agents/dev.md": 13000,
     "references/protocol.md": 13000, "references/dispatch.md": 9100, "references/design.md": 2600, "references/automation.md": 7100,
@@ -51,7 +54,7 @@ BUDGETS = {
 # The auditor reads one lens a spawn: qa (its reference + automation.md) is the costliest.
 SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"],
                "audit": ["references/audit-qa.md", "references/automation.md"]}
-PER_SPAWN_LIMIT = {"sa": 26050, "dev": 35750, "audit": 29150}
+PER_SPAWN_LIMIT = {"sa": 26050, "dev": 36000, "audit": 29150}
 DESCRIPTION_LIMIT = 700
 
 
@@ -415,6 +418,9 @@ class StateMachine(unittest.TestCase):
         ("agents/dev.md", r"Không bao giờ merge staging vào nhánh ticket", "DEV không đưa code ticket khác vào PR"),
         ("agents/dev.md", r"--wait 2\.5", "chờ pipeline dưới 180 giây, vẫn trong TTL của prompt cache"),
         ("agents/dev.md", r"`--skip '<glob>'` cho mỗi mục `staging.skip_checks`", "không chờ release mobile"),
+        ("agents/dev.md", r'merge --no-ff --no-edit -m "af: deploy <branch> \[skip ci\]"', "push staging không tự chạy CI"),
+        ("agents/dev.md", r"Không dispatch build/distribute mobile", "mặc định không build CI mobile"),
+        ("agents/dev.md", r"`--wipe --issue <n>`.*Exit 5.*dispatch thường", "wipe bị từ chối thì không xoá dữ liệu người khác"),
         ("agents/dev.md", r"Tối đa `run.max_test_rounds` vòng", "vòng sửa test có trần"),
         ("agents/dev.md", r"\*\*Lỗi block\*\*.*`\[AF:DEV\] blocked`", "hết vòng thì ghi lỗi block lên issue"),
         ("agents/dev.md", r"gắn `blocked`, giữ `in_progress`, mention `people.po`", "lỗi block báo PO"),

@@ -514,6 +514,17 @@ class Doctor(BoardCase):
         self.assertIn("✓ workflow deploy.yml (push) dispatch được trên staging", out)
         self.assertIn("apk.yml không có trigger workflow_dispatch", out)
 
+    def test_wipe_input_must_exist_and_skip_ci_needs_a_push_workflow(self):
+        import base64
+        self.write_config(CONFIG.replace('staging: {branch: staging, url: "https://s.example"}',
+                                         'staging:\n  branch: staging\n  url: "https://s.example"\n  skip_ci: true\n  workflows:\n    - {file: deploy.yml, when: need, wipe: wipe_data}'))
+        self.gh.routes.insert(0, ("GET", "/contents/.github/workflows/deploy.yml",
+                                  {"content": base64.b64encode(b"on:\n  workflow_dispatch:\n    inputs:\n      reset:\n").decode()}, 200, {}))
+        code, out = self.doctor()
+        self.assertEqual(code, 1, out)
+        self.assertIn("deploy.yml không có input wipe_data", out)
+        self.assertIn("skip_ci: true chưa có tác dụng", out)
+
     def test_platform_labels_must_exist(self):
         self.write_config(CONFIG.replace("qc_manual: qc-manual}", "qc_manual: qc-manual, platform: {web: \"platform:web\"}}"))
         code, out = self.doctor()
@@ -535,7 +546,10 @@ class StagingWorkflows(BoardCase):
   workflows:
     - file: deploy-staging.yml
       when: push
-      inputs: {env: staging, debug: false}""")
+      inputs: {env: staging, debug: false}
+      wipe: wipe_data
+    - file: seed.yml
+      when: need""")
 
     def setUp(self):
         super().setUp()
@@ -555,6 +569,21 @@ class StagingWorkflows(BoardCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.gh.on("GET", "/commits/staging", {"sha": SHA})
+        self.e2e_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.e2e_tmp.cleanup)
+        patcher = mock.patch.object(board, "E2E_TMP", self.e2e_tmp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def board_items(self, *items):
+        nodes = [{"id": "I%d" % n, "type": "ISSUE", "f0": {"name": status}, "content": {
+            "__typename": "Issue", "number": n, "title": "t", "state": "OPEN", "closedAt": None,
+            "repository": {"nameWithOwner": "acme/app"}, "labels": {"nodes": []}, "assignees": {"nodes": []}}} for n, status in items]
+        self.gh.on("POST", "/graphql", {"data": {"organization": {"projectV2": {"items": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}})
+
+    def dispatches(self):
+        return [body for url, body in self.posts() if url.endswith("/dispatches")]
 
     def posts(self):
         return [(url, json.loads(data) if data else None) for method, url, data in self.gh.calls if method == "POST"]
@@ -567,8 +596,63 @@ class StagingWorkflows(BoardCase):
         code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "deploy-staging.yml")
         self.assertEqual(code, 0, out)
         url, body = self.posts()[0]
-        self.assertEqual(body, {"ref": "staging", "inputs": {"env": "staging", "debug": "false"}})
+        self.assertEqual(body, {"ref": "staging", "inputs": {"env": "staging", "debug": "false", "wipe_data": "false"}})
         self.assertEqual(json.loads(out)["sha"], SHA)
+
+    def test_wipe_turns_on_the_declared_input_when_staging_is_free(self):
+        self.board_items((7, "In Progress"), (8, "In Review"), (9, "Done"))
+        self.gh.on("POST", "/actions/workflows/deploy-staging.yml/dispatches", {}, status=204)
+        code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "deploy-staging.yml", "--wipe", "--issue", "7")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.dispatches()[0]["inputs"]["wipe_data"], "true")
+        self.assertTrue(json.loads(out)["wipe"])
+        self.assertTrue(os.path.isfile(board._wipe_marker("acme/app")))
+
+    def test_wipe_is_refused_while_another_ticket_is_in_qc(self):
+        self.board_items((7, "In Progress"), (5, "In QC"))
+        code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "deploy-staging.yml", "--wipe", "--issue", "7")
+        self.assertEqual(code, 5, out)
+        self.assertEqual([u["issue"] for u in json.loads(out)["busy"]], [5])
+        self.assertEqual(self.dispatches(), [])
+
+    def test_wipe_is_refused_while_another_ticket_runs_flows_here(self):
+        self.board_items()
+        for issue, pid, done in ((4, os.getpid(), False), (6, os.getpid(), True), (7, os.getpid(), False)):
+            folder = os.path.join(self.e2e_tmp.name, "af-%d-e2e" % issue, "web")
+            os.makedirs(folder)
+            with open(os.path.join(folder, "state.json"), "w") as fh:
+                json.dump({"issue": issue, "pid": pid, "done": done}, fh)
+        code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "deploy-staging.yml", "--wipe", "--issue", "7")
+        self.assertEqual(code, 5, out)
+        self.assertEqual(json.loads(out)["busy"], [{"issue": 4, "why": "đang chạy flow"}])
+        self.assertEqual(self.dispatches(), [])
+
+    def test_wipe_needs_a_declared_input_and_the_issue(self):
+        for argv, msg in ((["--workflow", "seed.yml", "--wipe", "--issue", "7"], "không khai wipe"),
+                          (["--workflow", "deploy-staging.yml", "--wipe"], "--wipe cần --issue")):
+            with self.subTest(msg):
+                code, out = self.run_cmd("dispatch", "acme/app", *argv)
+                self.assertEqual(code, 1)
+                self.assertIn(msg, out)
+        self.assertEqual(self.posts(), [])
+
+    def test_cancel_keeps_a_recent_wipe_run(self):
+        old = "b" * 40
+        at = dt.datetime.now(dt.timezone.utc)
+        with open(board._wipe_marker("acme/app"), "w") as fh:
+            json.dump({"workflow": "deploy-staging.yml", "at": at.strftime("%Y-%m-%dT%H:%M:%SZ"), "issue": 7}, fh)
+        created = (at + dt.timedelta(seconds=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        wipe = dict(self.run_(1, status="in_progress", conclusion=None, sha=old), event="workflow_dispatch",
+                    path=".github/workflows/deploy-staging.yml", created_at=created)
+        other = dict(self.run_(2, status="in_progress", conclusion=None, sha=old), event="workflow_dispatch",
+                     path=".github/workflows/seed.yml", created_at=created)
+        self.gh.on("GET", "/actions/runs?branch=staging", {"workflow_runs": [wipe, other]})
+        self.gh.on("POST", "/cancel", {}, status=202)
+        code, out = self.run_cmd("cancel", "acme/app")
+        self.assertEqual(code, 0, out)
+        res = json.loads(out)
+        self.assertEqual([r["run"] for r in res["cancelled"]], [2])
+        self.assertEqual([r["run"] for r in res["kept"]], [1])
 
     def test_undeclared_workflow_is_refused(self):
         code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "release-production.yml")
