@@ -20,6 +20,9 @@ HOME_SECRETS = (".ssh/", ".aws/credentials", ".config/gh/hosts.yml", ".claude/.c
 
 STAGES = ["backlog", "ready", "in_progress", "in_review", "in_qc", "ready_to_merge", "done"]
 LABEL_KEYS = ["agent", "blocked", "needs_info", "changes_requested", "qc_failed", "qc_manual"]
+PLATFORM_KEY = "platform"  # labels.platform: platform name → label, optional (3.7 replaced the board field Platform)
+WORKFLOW_WHEN = ("push", "need")
+WORKFLOW_FILE = re.compile(r"^[\w.-]+\.ya?ml$")
 TOP_KEYS = {"schema", "lang", "board", "classify", "types", "labels", "git", "surfaces", "e2e_map", "forbidden", "design", "staging",
             "clarify", "people", "run", "notify"}
 CLARIFY_GATES = ("task", "implement")
@@ -282,6 +285,67 @@ def _check_clarify(clarify, fail, warn):
             fail("clarify.%s phải là ask hoặc auto (đang là %r)" % (gate, mode))
 
 
+def platform_labels(cfg):
+    """labels.platform as {platform: label}; {} when the repo has none."""
+    value = ((cfg or {}).get("labels") or {}).get(PLATFORM_KEY)
+    return {str(k): str(v) for k, v in value.items() if v} if isinstance(value, dict) else {}
+
+
+def label_names(cfg):
+    """Every label name the config uses: the signal labels plus the platform labels."""
+    labels = (cfg or {}).get("labels") or {}
+    return [v for k, v in labels.items() if k != PLATFORM_KEY and isinstance(v, str) and v] + list(platform_labels(cfg).values())
+
+
+def staging_workflows(cfg):
+    """staging.workflows normalised to [{file, when, inputs}], entries without a file dropped."""
+    out = []
+    for item in as_list(((cfg or {}).get("staging") or {}).get("workflows")):
+        if isinstance(item, dict) and item.get("file"):
+            out.append({"file": str(item["file"]), "when": item.get("when"), "inputs": item.get("inputs") or {}})
+    return out
+
+
+def _check_platform(cfg, fail, warn):
+    labels = (cfg.get("labels") or {}).get(PLATFORM_KEY)
+    if labels is not None and (not isinstance(labels, dict) or not all(isinstance(v, str) and v for v in labels.values())):
+        fail("labels.platform phải là map nền tảng → tên label, vd {mobile: \"platform:mobile\", web: \"platform:web\"}")
+        return
+    if not labels:
+        warn("labels.platform chưa khai — ticket không ghi được nền tảng (mobile/web/backend); /agentflow:init thêm")
+    if "platform" in ((cfg.get("board") or {}).get("fields") or {}):
+        warn("board.fields.platform không còn dùng (3.7: nền tảng là label labels.platform) — chuyển dữ liệu: "
+             "agentflow-board platform-migrate, rồi xoá key")
+    keys = {str(k).lower() for k in labels or {}}
+    for key, surface in (cfg.get("surfaces") or {}).items():
+        platform = isinstance(surface, dict) and surface.get("platform")
+        if platform and keys and str(platform).lower() not in keys:
+            warn("surfaces.%s.platform = %r không phải key của labels.platform (%s)" % (key, platform, ", ".join(sorted(keys))))
+
+
+def _check_workflows(staging, fail):
+    items = staging.get("workflows")
+    if items is None:
+        return
+    if not isinstance(items, list):
+        fail("staging.workflows phải là danh sách, vd [{file: deploy-staging.yml, when: push}]")
+        return
+    seen = set()
+    for i, item in enumerate(items):
+        name = "staging.workflows[%d]" % i
+        if not isinstance(item, dict) or not WORKFLOW_FILE.match(str(item.get("file") or "")):
+            fail("%s.file phải là tên file trong .github/workflows, vd deploy-staging.yml" % name)
+            continue
+        if item["file"] in seen:
+            fail("%s: %s khai hai lần" % (name, item["file"]))
+        seen.add(item["file"])
+        if item.get("when") not in WORKFLOW_WHEN:
+            fail("%s.when phải là push hoặc need (đang là %r)" % (name, item.get("when")))
+        inputs = item.get("inputs")
+        if inputs is not None and (not isinstance(inputs, dict) or any(isinstance(v, (dict, list)) for v in inputs.values())):
+            fail("%s.inputs phải là map tên → giá trị đơn, vd {env: staging}" % name)
+
+
 def validate_config(cfg):
     """Shape problems of a parsed agentflow.yaml, no network: list of (level, message), level ∈ fail | warn."""
     out = []
@@ -312,6 +376,7 @@ def validate_config(cfg):
     for key in LABEL_KEYS:
         if not labels.get(key):
             fail("labels.%s chưa khai báo" % key)
+    _check_platform(cfg, fail, warn)
     if cfg.get("classify") not in ("issue-type", "label"):
         fail("classify phải là issue-type hoặc label (đang là %r)" % cfg.get("classify"))
     if not cfg.get("types"):
@@ -350,6 +415,7 @@ def validate_config(cfg):
     skip = (cfg.get("staging") or {}).get("skip_checks")
     if skip is not None and not all(isinstance(x, str) and x for x in as_list(skip)):
         fail("staging.skip_checks phải là danh sách tên check (glob), vd [\"distribute-mobile*\"]")
+    _check_workflows(cfg.get("staging") or {}, fail)
     _check_clarify(cfg.get("clarify"), fail, warn)
     models = (cfg.get("run") or {}).get("models") or {}
     if not isinstance(models.get("dev") or {}, dict) or not (models.get("dev") or {}).get("default"):

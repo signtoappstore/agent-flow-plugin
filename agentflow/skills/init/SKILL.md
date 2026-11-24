@@ -56,20 +56,20 @@ Bắt buộc **full scope** (mọi scope classic token): `whoami` exit 1 ⇒ **d
 
 ## 5. Surfaces + lệnh check
 
-Scan marker (`package.json`, `pubspec.yaml`, `go.mod`, `pyproject.toml`, `Cargo.toml`, `build.gradle*`, `pom.xml`…) ở root và thư mục con cấp 1. Đề xuất mỗi phần build riêng một surface: `path`, `platform` (option của field Platform), `check` (typecheck/lint/format/analyze), `test`, `e2e` — **lấy nguyên lệnh** từ bảng quality gate trong CONTRIBUTING, script trong `package.json`, `Makefile`, hoặc job CI; `e2e_dir` = thư mục test e2e có sẵn (`e2e/`, `.maestro/`, `cypress/`, `integration_test/`, `testDir` của Playwright), DEV commit flow vào đó; mobile: `install` = lệnh build + cài bản trỏ staging lên emulator, lấy từ README/script, không đoán. Surface UI (mobile, web) chưa có e2e → Maestro: `e2e_dir: .maestro`, `e2e: maestro test .maestro`; đã có framework khác → hỏi người giữ hay chuyển Maestro. Repo một khối → bỏ hẳn `surfaces`, trừ khi có e2e (một surface `path: ./`). `forbidden`: thư mục secret thấy được (vd `secret/**`) + file credential.
+Scan marker (`package.json`, `pubspec.yaml`, `go.mod`, `pyproject.toml`, `Cargo.toml`, `build.gradle*`, `pom.xml`…) ở root và thư mục con cấp 1. Đề xuất mỗi phần build riêng một surface: `path`, `platform` (key của `labels.platform`), `check` (typecheck/lint/format/analyze), `test`, `e2e` — **lấy nguyên lệnh** từ bảng quality gate trong CONTRIBUTING, script trong `package.json`, `Makefile`, hoặc job CI; `e2e_dir` = thư mục test e2e có sẵn (`e2e/`, `.maestro/`, `cypress/`, `integration_test/`, `testDir` của Playwright), DEV commit flow vào đó; mobile: `install` = lệnh build + cài bản trỏ staging lên emulator, lấy từ README/script, không đoán. Surface UI (mobile, web) chưa có e2e → Maestro: `e2e_dir: .maestro`, `e2e: maestro test .maestro`; đã có framework khác → hỏi người giữ hay chuyển Maestro. Repo một khối → bỏ hẳn `surfaces`, trừ khi có e2e (một surface `path: ./`). `forbidden`: thư mục secret thấy được (vd `secret/**`) + file credential.
 
 ## 6. Board
 
 Chi tiết + lệnh: `${CLAUDE_PLUGIN_ROOT}/skills/init/references/board-setup.md`. Tóm tắt:
-- **Link board có sẵn** (người dán URL) → `agentflow-board inspect <url>` → map 7 stage vào option Status theo tên gần nhất, trình bảng cho người chốt. Thiếu stage → `status-plan` (rename / thêm, giữ id option ⇒ card không mất Status) → người duyệt → `status-apply --yes`. Field Priority/Size/Platform thiếu → `ensure-field`.
-- **Tạo board mới** → `agentflow-board create` với preset 7 cột + Priority/Size/Platform(+Sprint).
+- **Link board có sẵn** (người dán URL) → `agentflow-board inspect <url>` → map 7 stage vào option Status theo tên gần nhất, trình bảng cho người chốt. Thiếu stage → `status-plan` (rename / thêm, giữ id option ⇒ card không mất Status) → người duyệt → `status-apply --yes`. Field Priority/Size thiếu → `ensure-field`. Còn field Platform (bản < 3.7) → `platform-migrate` (reference §Platform).
+- **Tạo board mới** → `agentflow-board create` với preset 7 cột + Priority/Size(+Sprint).
 - Kiểm workflow *Item closed → Done* (doctor báo) — chỉ bật được bằng UI: hướng dẫn một dòng.
 - Đề nghị cập nhật README của board theo luồng mới (template trong reference).
 
 ## 7. Issue type, label, template
 
 - `classify`: org có issue types → `issue-type`; `agentflow-board issue-types --org <org>`, thiếu type trong `types` → đề nghị `--ensure` (cần quyền admin org). Repo cá nhân → `classify: label`, label = tên type.
-- Label: `agentflow-board labels --repo <canonical> --label "<tên>|<màu>|<mô tả ≤100 ký tự>" …` cho mọi value trong `labels` (bảng màu + mô tả trong reference). Label đã có giữ nguyên tên, chỉ cập nhật màu/mô tả khi người đồng ý.
+- Label: `agentflow-board labels --repo <canonical> --label "<tên>|<màu>|<mô tả ≤100 ký tự>" …` cho mọi value trong `labels`, cả `labels.platform` (bảng màu + mô tả trong reference). Label đã có giữ nguyên tên, chỉ cập nhật màu/mô tả khi người đồng ý.
 - Repo chưa có issue form / PR template → đề nghị scaffold từ `${CLAUDE_PLUGIN_ROOT}/templates/` (reference §Template). Có rồi → giữ, chỉ kiểm PR template có chỗ cho `<git.link> #` và "Kiểm chứng lại".
 
 ## 8. Figma, người, thông báo, loop
@@ -77,7 +77,7 @@ Chi tiết + lệnh: `${CLAUDE_PLUGIN_ROOT}/skills/init/references/board-setup.m
 - **Figma**: dùng không? Có → `design.figma: true`; kiểm tool MCP `figma` có trong session; chưa authenticate → "chạy `/mcp` → figma → Authenticate". Thấy tài liệu sản phẩm/prototype (`docs/`, `*.html` thiết kế…) → đề xuất `design.repo`.
 - **people**: `po`, `qc`, `reviewers` (GitHub login) — gợi ý từ assignee/collaborator. Mention chính token owner không tạo notification.
 - **Telegram**: dùng không? Có → `notify.telegram: true`; kiểm `agentflow-settings has TELEGRAM_BOT_TOKEN && agentflow-settings has TELEGRAM_CHAT_ID`; thiếu → người ghi bằng `set-secret` (có hiệu lực ngay), chưa có thì giữ `notify.telegram: false`.
-- **staging**: `url` (API/web), `build` (cách lấy bản build mobile), `notes` (path secret folder của project chứa app id, tài khoản test, vd `secret/staging/` — gitignored, không nằm trong `forbidden`), `timeout_min`, `skip_checks` (glob tên check release mobile, DEV không chờ). Kiểm trong `.github/workflows/`: có pipeline chạy khi push vào nhánh staging và báo check về commit, không có → nói rõ DEV sẽ `blocked` khi hết timeout. Check phải bao trùm bước deploy server/web, không thì flow chạy nhầm bản cũ. Nhánh staging phải cho push trực tiếp, không bật rule bắt buộc PR hay status check trước khi push.
+- **staging**: `url` (API/web), `build` (cách lấy bản build mobile), `notes` (path secret folder của project chứa app id, tài khoản test, vd `secret/staging/` — gitignored, không nằm trong `forbidden`), `timeout_min`, `skip_checks` (glob tên check release mobile, DEV không chờ). Kiểm trong `.github/workflows/`: có pipeline chạy khi push vào nhánh staging và báo check về commit, không có → nói rõ DEV sẽ `blocked` khi hết timeout. Check phải bao trùm bước deploy server/web, không thì flow chạy nhầm bản cũ. Nhánh staging phải cho push trực tiếp, không bật rule bắt buộc PR hay status check trước khi push. `workflows`: workflow có `workflow_dispatch` dùng cho staging (deploy, build app) — `when: push` khi pipeline không tự chạy lúc push, `need` cho việc lúc cần, `inputs` cố định; DEV tự dispatch không hỏi, nên không đề xuất workflow deploy production/release; người chốt.
 - **run**: giữ mặc định (`parallel 2`, `max_tasks 5`, `max_review_rounds 3`, `max_qc_rounds 2`, `max_test_rounds 3`, SA opus, DEV opus) trừ khi người muốn đổi.
 
 ## 9. Ghi file
@@ -86,7 +86,7 @@ Chi tiết + lệnh: `${CLAUDE_PLUGIN_ROOT}/skills/init/references/board-setup.m
 2. **`.claude/settings.local.json`** — chỉ qua `agentflow-settings` (merge, giữ mọi key; `agentflow-settings show` xem cây key, value trong `env` bị che):
    - `agentflow-settings set enabledPlugins.<id> true` — id: `jq -r '.plugins|keys[]|select(startswith("agentflow@"))' ~/.claude/plugins/installed_plugins.json`.
    - `agentflow-settings set extraKnownMarketplaces.<marketplace>.source '<json>'` = source đang đăng ký trong `~/.claude/plugins/known_marketplaces.json` (không đọc được → bỏ, đừng bịa).
-   - `agentflow-settings allow [--user] <rule…>` (rule: dòng ⚠ `permissions.allow` ở doctor) **chỉ khi người đồng ý** chạy loop không hỏi quyền; đề xuất `--user` (mọi repo) hơn repo này. Không dùng `defaultMode: bypassPermissions`: Claude Code bỏ qua nó trong settings project. Nói rõ: lớp chặn khi đó là hook của plugin (merge/approve PR, force-push, push nhánh protected, đọc/sửa `forbidden`). Hook đọc cấu trúc lệnh và mở lệnh bọc, nhưng không thấy được thứ chỉ lộ ra lúc chạy (script sinh sau, `make deploy`) — không tuyệt đối. Branch protection trên GitHub vẫn là lớp chắc nhất, doctor báo nếu base chưa có.
+   - `agentflow-settings allow [--user] <rule…>` (rule: dòng ⚠ `permissions.allow` ở doctor) **chỉ khi người đồng ý** chạy loop không hỏi quyền; đề xuất `--user` (mọi repo) hơn repo này. Không dùng `defaultMode: bypassPermissions`: Claude Code bỏ qua nó trong settings project. Nói rõ: lớp chặn khi đó là hook của plugin (merge/approve PR, force-push, push nhánh protected, workflow ngoài `staging.workflows`, đọc/sửa `forbidden`). Hook đọc cấu trúc lệnh và mở lệnh bọc, nhưng không thấy được thứ chỉ lộ ra lúc chạy (script sinh sau, `make deploy`) — không tuyệt đối. Branch protection trên GitHub vẫn là lớp chắc nhất, doctor báo nếu base chưa có.
 3. Repo nhiều người: `agentflow.yaml` commit được; mỗi người tự chạy `/agentflow:init` để có settings local riêng, và đăng nhập `gh` bằng tài khoản của mình.
 
 ## 10. Verify
@@ -98,4 +98,4 @@ Chi tiết + lệnh: `${CLAUDE_PLUGIN_ROOT}/skills/init/references/board-setup.m
 
 ## 11. Tóm tắt (≤ 15 dòng)
 
-Repo · board (URL, map 7 stage) · base/protected · staging (branch, url, pipeline) · surfaces · labels · type mode · Figma · Telegram · people · permission mode · file đã ghi · việc tay còn lại (workflow board, Figma OAuth). Kết thúc: `Tiếp: /agentflow:task <mô tả> để tạo việc + chuyển Ready, rồi /agentflow:run (hoặc /agentflow:do #n).`
+Repo · board (URL, map 7 stage) · base/protected · staging (branch, url, pipeline, workflows) · surfaces · labels · type mode · Figma · Telegram · people · permission mode · file đã ghi · việc tay còn lại (workflow board, Figma OAuth). Kết thúc: `Tiếp: /agentflow:task <mô tả> để tạo việc + chuyển Ready, rồi /agentflow:run (hoặc /agentflow:do #n).`

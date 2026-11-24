@@ -22,18 +22,20 @@ import afconfig  # noqa: E402
 # few hundred tokens a spawn against ~20M tokens of late, full-context test turns per ticket (DESIGN-NOTES.md).
 # 3.6 (clarify auto · ask) keeps the mechanics in references/clarify.md, read only by /task, an ask-mode orchestrator and an
 # ask-mode SA design: ~0.3k a spawn for the CLARIFY input, the ambiguity rule and the new heads/state key/RESULT value.
+# 3.7 (platform labels, DEV dispatch/rerun/cancel on staging) adds ~0.5k to a DEV spawn and ~0.2k to SA: one rerun saves a
+# blocked ticket and a human round trip. init/task/board-setup grow by the migration and label steps, read once per repo/ticket.
 BUDGETS = {
-    "agents/sa.md": 9900, "agents/dev.md": 12450,
+    "agents/sa.md": 10100, "agents/dev.md": 13000,
     "references/protocol.md": 12700, "references/dispatch.md": 9000, "references/design.md": 2600, "references/automation.md": 6800,
     "references/engineering.md": 2850, "references/clarify.md": 6650,
-    "skills/init/SKILL.md": 10650, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 2800, "skills/doctor/SKILL.md": 2000,
-    "skills/run/SKILL.md": 2400, "skills/status/SKILL.md": 2850, "skills/task/SKILL.md": 9600, "skills/init/references/board-setup.md": 4850,
+    "skills/init/SKILL.md": 11100, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 2800, "skills/doctor/SKILL.md": 2000,
+    "skills/run/SKILL.md": 2400, "skills/status/SKILL.md": 2850, "skills/task/SKILL.md": 9850, "skills/init/references/board-setup.md": 5550,
 }
 # What a spawn reads before it looks at the ticket: its prompt, the protocol and the references it always reads.
 # 2.x DEV paid 9.3k + 12.1k + 8.3k (it read the reviewer prompt to self-review); the shared engineering.md replaced that.
 # 3.0 happy path: SA design + DEV + SA review ≈ 24k + 33.4k + 24k, where the QC plan + verify spawns cost 2 × 27.7k more.
 SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"]}
-PER_SPAWN_LIMIT = {"sa": 25400, "dev": 34750}
+PER_SPAWN_LIMIT = {"sa": 25600, "dev": 35300}
 DESCRIPTION_LIMIT = 700
 
 
@@ -505,13 +507,16 @@ class SharedFacts(unittest.TestCase):
         self.assertEqual(re.findall(r"^\| `([a-z_]+)` \| [A-Z]", setup.split("## Link board")[1].split("Thiếu stage")[0], re.M), afconfig.STAGES)
 
     def test_labels_everywhere(self):
-        self.assertEqual(list(TEMPLATE["labels"]), afconfig.LABEL_KEYS)
+        signals = {k: v for k, v in TEMPLATE["labels"].items() if k != afconfig.PLATFORM_KEY}
+        self.assertEqual(list(signals), afconfig.LABEL_KEYS)
         setup = read("skills/init/references/board-setup.md").split("## Label")[1].split("Repo đã có")[0]
         rows = re.findall(r"^\| `([a-z_]+)` \| ([\w-]+) \|", setup, re.M)
-        self.assertEqual(rows, list(TEMPLATE["labels"].items()))
+        self.assertEqual(rows, list(signals.items()))
+        for key, name in TEMPLATE["labels"][afconfig.PLATFORM_KEY].items():
+            self.assertIn("%s → %s" % (key, name), setup)
         for rel in prompts():
             for key in re.findall(r"labels\.([a-z_]+)", read(rel)):
-                self.assertIn(key, afconfig.LABEL_KEYS, rel)
+                self.assertIn(key, afconfig.LABEL_KEYS + [afconfig.PLATFORM_KEY], rel)
 
     def test_prompts_use_label_keys_not_literal_names(self):
         for name in ("agents/sa.md", "agents/dev.md", "references/dispatch.md"):

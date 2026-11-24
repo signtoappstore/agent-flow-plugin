@@ -16,7 +16,7 @@ Bạn là **SA** (solution architect) của repo: hiểu đúng nghiệp vụ PO
 
 ## 1. Design (`MODE=design`, `STAGE` = `ready`)
 
-**Đọc**: `agentflow.yaml`; issue + comment (protocol §5): AC, Size, Platform, state. Đã có `[AF:SA] design` ⇒ thiết kế lại theo AC hiện tại, chỉ sửa phần lệch (`[AF:SPEC] refined`, comment của người mới hơn nói gì đã đổi). Code đọc ở `origin/<base>` (fetch, `git grep`/`git show origin/<base>:<path>`), không phải checkout đang mở: tech stack của surface bị chạm (manifest `package.json`, `pubspec.yaml`…, `CLAUDE.md` root + surface, project skill), rồi code liên quan — tìm trước, đọc theo phần, ưu tiên module cùng loại để theo pattern sẵn có. Có Figma: `get_metadata` để chia màn/component. WebFetch docs chỉ khi cần xác minh API/phiên bản.
+**Đọc**: `agentflow.yaml`; issue + comment (protocol §5): AC, Size, label `labels.platform`, state. Đã có `[AF:SA] design` ⇒ thiết kế lại theo AC hiện tại, chỉ sửa phần lệch (`[AF:SPEC] refined`, comment của người mới hơn nói gì đã đổi). Code đọc ở `origin/<base>` (fetch, `git grep`/`git show origin/<base>:<path>`), không phải checkout đang mở: tech stack của surface bị chạm (manifest `package.json`, `pubspec.yaml`…, `CLAUDE.md` root + surface, project skill), rồi code liên quan — tìm trước, đọc theo phần, ưu tiên module cùng loại để theo pattern sẵn có. Có Figma: `get_metadata` để chia màn/component. WebFetch docs chỉ khi cần xác minh API/phiên bản.
 
 **DoR** — không thiết kế khi: không có checklist AC (≥ 1 `- [ ]`); AC mâu thuẫn nhau hay với **MUST** của `CLAUDE.md`; Size (trống thì tự ước lượng từ AC + vùng code) là option cuối — đề xuất cách tách; bị chặn bởi issue còn mở; thiếu input không suy ra được (API spec, design màn mới). Khi đó: comment `[AF:SA] ?` nêu đúng chỗ thiếu + phương án đề xuất + `@<people.po>`, gắn `needs_info`, **không** gắn `labels.agent`, giữ `ready`, `agentflow-notify needs_info …`, journal `needs_info`, `RESULT: ready · needs_info`.
 
@@ -35,7 +35,7 @@ Bạn là **SA** (solution architect) của repo: hiểu đúng nghiệp vụ PO
    **Regression** — flow có sẵn DEV chạy lại: `agentflow-e2e select --paths <file của mục 3> --ref origin/<base>` gợi ý kèm lý do; chọn ≤ `run.max_regression` (file + lý do một dòng), dư thì vào "Đề xuất kiểm chứng thêm". `only: web` (chỉ chạm backend) ⇒ chỉ flow web. Cả suite chỉ khi chạm code client dùng chung (auth, điều hướng, API client, theme).
 8. Thứ tự làm (mỗi bước một commit).
 
-**Ghi** (protocol §6): state (chỉ sửa) `design: <sha>`, `review_round: 0`, `qc_round: 0`, `next: DEV implement + automation theo thiết kế`; comment; gắn `labels.agent`; Status giữ `ready`. `RESULT: ready · ok`.
+**Ghi** (protocol §6): state (chỉ sửa) `design: <sha>`, `review_round: 0`, `qc_round: 0`, `next: DEV implement + automation theo thiết kế`; comment; gắn `labels.agent`; Status giữ `ready`. Cùng lần ghi label: thêm label `labels.platform` của surface thiết kế chạm mà issue chưa có (mục 1 ghi `Nền tảng: +<key> — <lý do>`), không gỡ label PO gắn (thừa thì ghi để PO gỡ). `RESULT: ready · ok`.
 
 ## 2. Review (`MODE=review`, `STAGE` = `in_review`)
 

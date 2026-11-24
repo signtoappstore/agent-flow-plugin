@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """AgentFlow PreToolUse guard. Exit 2 blocks the tool call; stderr is shown to Claude.
 
-Hard rules (DESIGN-NOTES.md §Non-goals): no PR merge, no PR approve, no workflow dispatch, no force-push or remote
+Hard rules (DESIGN-NOTES.md §Non-goals): no PR merge, no PR approve, no direct workflow dispatch/rerun/cancel (on the
+staging branch only through `agentflow-board dispatch|rerun|cancel`, which checks the branch, the declared workflows
+and the re-run cap; never by the SA), no force-push or remote
 branch delete, no repo or package delete (the token has full scope), no push to protected branches (the staging
 branch is not one; force-push stays blocked there too), no direct file write to staging via MCP, no edit/read/print
 of forbidden (secret) paths, no secret value in a tool call.
@@ -99,7 +101,8 @@ GH_API_VALUE_FLAGS = {"-X", "--method", "-H", "--header", "-f", "--raw-field", "
 
 MSG_MERGE = "agent không bao giờ merge PR — người approve + merge ở cột ready_to_merge."
 MSG_APPROVE = "agent không approve PR — post review với event=COMMENT."
-MSG_DISPATCH = "agent không chạy/dispatch workflow — ở nhiều repo chạy workflow là deploy; báo người nếu cần."
+MSG_DISPATCH = ("agent không chạy/rerun/cancel workflow trực tiếp — ở nhiều repo chạy workflow là deploy. Trên staging: "
+                "`agentflow-board dispatch|rerun|cancel <owner/repo>` (chỉ workflow khai trong staging.workflows); ngoài staging báo người.")
 MSG_REF = "agent không sửa/xoá ref, branch protection hay ruleset trên remote qua API."
 MSG_TOKEN = "không in token — test sự tồn tại bằng `[ -n \"${VAR:-}\" ]`."
 MSG_FORCE = "force-push / mirror / xoá nhánh trên remote bị cấm. Sync bằng `git merge` rồi push thường."
@@ -111,7 +114,7 @@ PACKAGES = re.compile(r"(^|/)(user|users/[^/\s]+|orgs/[^/\s]+)/packages/")
 
 API_WRITES = [  # REST endpoints that must not receive a write
     (re.compile(r"/pulls/[^/\s]+/merge\b"), MSG_MERGE), (re.compile(r"/merges\b"), MSG_MERGE), (re.compile(r"/auto-merge\b"), MSG_MERGE),
-    (re.compile(r"/dispatches\b"), MSG_DISPATCH), (re.compile(r"/actions/(runs|jobs)/[^/\s]+/rerun"), MSG_DISPATCH),
+    (re.compile(r"/dispatches\b"), MSG_DISPATCH), (re.compile(r"/actions/(runs|jobs)/[^/\s]+/(rerun|cancel|force-cancel)"), MSG_DISPATCH),
     (re.compile(r"/git/refs\b"), MSG_REF), (re.compile(r"/branches/[^/\s]+/protection\b"), MSG_REF), (re.compile(r"/rulesets\b"), MSG_REF),
 ]
 GRAPHQL_BANNED = [
@@ -126,7 +129,7 @@ CODE_BANNED = [
     (re.compile(r"\bgit\b[^\n]*\bpush\b[^\n]*(--force|--mirror|--prune|--delete|[\s\"',]-[a-zA-Z]*[fd]\b|[\s\"',]\+\S)"), MSG_FORCE),
     (re.compile(r"\bgh\b[^\n]*\bpr\b[^\n]*\bmerge\b"), MSG_MERGE),
     (re.compile(r"\bgh\b[^\n]*\bpr\b[^\n]*\breview\b[^\n]*(--approve|[\s\"',]-a\b)"), MSG_APPROVE),
-    (re.compile(r"\bgh\b[^\n]*\b(workflow\b[^\n]*\brun|run\b[^\n]*\brerun)\b"), MSG_DISPATCH),
+    (re.compile(r"\bgh\b[^\n]*\b(workflow\b[^\n]*\brun|run\b[^\n]*\b(rerun|cancel))\b"), MSG_DISPATCH),
     (re.compile(r"\bgh\b[^\n]*\brepo\b[^\n]*\bdelete\b"), MSG_DESTROY),
     (re.compile(r"\bgh\b[^\n]*\bauth\b[^\n]*\btoken\b"), MSG_TOKEN),
     (re.compile(r"(?<!\bin )os\.environ(?!\s*(\.get\b|\[))|process\.env(?![.\[])"), "không in toàn bộ env — có secret trong đó."),
@@ -614,7 +617,7 @@ def check_gh(args, session, scope, cmd):
         block(MSG_UNDRAFT)
     if head == ["pr", "create"] and session.role == "dev" and "--draft" not in args and "-d" not in args:
         block(MSG_DRAFT)
-    if head in (["workflow", "run"], ["run", "rerun"]):
+    if head in (["workflow", "run"], ["run", "rerun"], ["run", "cancel"]):
         block(MSG_DISPATCH)
     if head == ["repo", "delete"]:
         block(MSG_DESTROY)
@@ -903,6 +906,14 @@ def check_settings_tool(args, session):
             block("`%s` có thể tắt hook hoặc plugin — người sửa tay nếu thật sự cần." % args[1])
 
 
+def check_board_tool(args, session):
+    sub = next((a for a in args if not a.startswith("-")), "")
+    if sub in ("dispatch", "rerun", "cancel") and session.role == "sa":
+        block("SA chỉ review — DEV chạy workflow trên staging.")
+    if sub == "platform-migrate" and session.role:
+        block("subagent không chuyển dữ liệu board — `/agentflow:init` làm, người duyệt.")
+
+
 def glob_hits_secret(pattern):
     return pattern not in ("*", "**") and any(fnmatch.fnmatch(p, pattern.rsplit("/", 1)[-1]) for p in SECRET_PROBES)
 
@@ -1023,6 +1034,8 @@ def run_argv(argv, cmd, session):
             check_print(exe, args, cmd, session)
     if exe == "agentflow-settings":
         check_settings_tool(args, session)
+    if exe == "agentflow-board":
+        check_board_tool(args, session)
     if not session.hard_only and exe not in ("git", "gh"):
         check_paths(exe, args, session)
         check_mutators(exe, args, session)

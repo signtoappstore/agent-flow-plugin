@@ -15,12 +15,12 @@ Hai cổng: `task` (trước khi ghi ticket) và `implement` (trước khi DEV c
 
 **ask** — skill §2–§9 như viết, thêm:
 - Mục §3 có ≥ 2 hướng sản phẩm hợp lý (phạm vi, luồng, luật) → AskUserQuestion, option = hướng, preview = được/mất khi cần so.
-- Thay "chờ PO duyệt" của §4: trình bản nháp kèm **Sẽ thực hiện**, mỗi issue một dòng `<tạo | sửa #n> "<tiêu đề>" · type · <k> AC · Priority/Size/Platform · assignee · milestone · cha/sub · Bị chặn/Liên quan`, rồi `→ <board.status.backlog>` + comment `[AF:SPEC]`. AskUserQuestion: "Ghi lên GitHub (Recommended)" · "Sửa" (hỏi sửa gì, soạn lại, trình lại) · "Huỷ" (không ghi gì). Chỉ chạy §5 sau "Ghi lên GitHub".
+- Thay "chờ PO duyệt" của §4: trình bản nháp kèm **Sẽ thực hiện**, mỗi issue một dòng `<tạo | sửa #n> "<tiêu đề>" · type · <k> AC · Priority/Size · nền tảng · assignee · milestone · cha/sub · Bị chặn/Liên quan`, rồi `→ <board.status.backlog>` + comment `[AF:SPEC]`. AskUserQuestion: "Ghi lên GitHub (Recommended)" · "Sửa" (hỏi sửa gì, soạn lại, trình lại) · "Huỷ" (không ghi gì). Chỉ chạy §5 sau "Ghi lên GitHub".
 
 **auto** — §1, §2 như viết; thay phần hỏi của §3 và bước duyệt nháp của §4:
 - Không hỏi (trừ khi không có mô tả). Mỗi điểm mở của checklist §3 tự chọn theo thứ tự căn cứ: tài liệu/design → hành vi đang chạy → bản nhỏ nhất vẫn có giá trị và an toàn cho người dùng (có đường lỗi, không mất dữ liệu).
 - Luật, con số, ngưỡng tự đặt vào section cuối body `### Giả định (agent tự chọn)`, mỗi dòng `- <quyết định> — <căn cứ>`, thay cho `Chưa rõ`. Thứ chỉ PO biết mà không có căn cứ (bằng chứng bug, hạn chót, đối tác) → vẫn `Chưa rõ` + `needs_info`.
-- Trùng gần giống → tạo mới kèm `Liên quan #m`; trùng hẳn → không tạo, báo #m. Cấu trúc theo dấu hiệu §3: chung mục tiêu ⇒ cha + sub-issue, khác mục tiêu ⇒ N ticket, không dấu hiệu ⇒ 1. Priority/Size/Platform theo checklist, assignee = login `get_me`, milestone mở gần hạn nhất.
+- Trùng gần giống → tạo mới kèm `Liên quan #m`; trùng hẳn → không tạo, báo #m. Cấu trúc theo dấu hiệu §3: chung mục tiêu ⇒ cha + sub-issue, khác mục tiêu ⇒ N ticket, không dấu hiệu ⇒ 1. Priority/Size, label nền tảng theo checklist, assignee = login `get_me`, milestone mở gần hạn nhất.
 - Bảng chấm §4 vẫn chạy, ✗ thì tự sửa. Ghi luôn (§5); `[AF:SPEC] created` thêm `auto · <k> giả định`.
 - Cổng Ready (§6) vẫn hỏi PO — agent không đưa ticket ra khỏi Backlog khi người chưa xác nhận: câu hỏi liệt kê các Giả định. PO muốn đổi giả định → hỏi điểm đó như ask, cập nhật body (§5 mode `#n`), xét lại §6.
 

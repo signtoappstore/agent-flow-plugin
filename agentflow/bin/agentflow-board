@@ -14,6 +14,8 @@ Auth: the token `gh` uses ($GH_TOKEN, $GITHUB_TOKEN, else `gh auth token`). Neve
   status-apply <board-url> --want ... --yes apply (option ids preserved — cards keep values)
        [--allow-drop]                       needed to remove an option that still holds cards
   ensure-field <board-url> --name N --options a,b,..   create single-select field if missing
+  platform-migrate <board-url> --repo O/R [--field Platform] [--map Option=label ...] [--yes] [--drop-field]
+                                            board field Platform → labels.platform on each issue; plan without --yes
   create --owner O --owner-type org|user --title T --repo O/R --want A,B,..
        [--field Name=a,b,..]... [--sprint DAYS] [--description TXT] [--readme FILE]
   repo <owner/repo>                         canonical name, owner type, default branch
@@ -22,6 +24,10 @@ Auth: the token `gh` uses ($GH_TOKEN, $GITHUB_TOKEN, else `gh auth token`). Neve
   issue-types --org O [--ensure Name|description ...]
   metrics <board-url> [--days N] [--stages k=v,...] [--parked l1,l2,...]
   checks <owner/repo> --branch B --contains SHA [--since ISO] [--wait MIN] [--skip GLOB]   CI of the branch head; one JSON line
+  dispatch <owner/repo> --workflow FILE     run a workflow of staging.workflows on staging.branch (inputs from the config)
+  rerun <owner/repo> [--run ID]             re-run failed jobs of runs on staging.branch (default: the runs of its head);
+                                            at most MAX_RERUNS re-runs per run
+  cancel <owner/repo> [--run ID]            cancel unfinished runs on staging.branch whose commit is not its head
   feedback <owner/repo> --issue N [--issue M ...] [--summary]   people's feedback on the PR of each issue
        (state block `pr`, else the one open PR linked to it); one JSON line per issue
   doctor [--root DIR]                       check agentflow.yaml against GitHub
@@ -30,6 +36,7 @@ Auth: the token `gh` uses ($GH_TOKEN, $GITHUB_TOKEN, else `gh auth token`). Neve
 """
 
 import argparse
+import base64
 import datetime as dt
 import fnmatch
 import json
@@ -343,6 +350,54 @@ def cmd_ensure_field(a):
     print("OK đã tạo field %s" % a.name)
 
 
+def _platform_plan(a, labels):
+    """(issue number → label, values without a label, values held by other repos' issues) for a board field."""
+    mapping = {k.lower(): v for k, v in labels.items()}
+    for spec in a.map or []:
+        option, _, label = spec.partition("=")
+        mapping[option.strip().lower()] = label.strip()
+    plan, unmapped, foreign = {}, set(), set()
+    for it in iter_items(a.url, [a.field]):
+        value = it["fields"].get(a.field)
+        if not value or not it["number"] or it["type"] != "ISSUE":
+            continue
+        if not it["repo"] or it["repo"].lower() != a.repo.lower():
+            foreign.add(value)
+        elif value.lower() in mapping:
+            plan[it["number"]] = (mapping[value.lower()], it["labels"])
+        else:
+            unmapped.add(value)
+    return plan, unmapped, foreign
+
+
+def cmd_platform_migrate(a):
+    root = afconfig.repo_root() or "."
+    labels = afconfig.platform_labels(afconfig.load_config(root) or {})
+    proj = get_project(a.url)
+    fld = field(proj, a.field)
+    if not fld:
+        print("OK board không có field %s — không có gì để chuyển" % a.field)
+        return
+    plan, unmapped, foreign = _platform_plan(a, labels)
+    for n, (label, have) in sorted(plan.items()):
+        print("#%d %s%s" % (n, label, " (đã có)" if label in have else ""))
+    if unmapped:
+        die("giá trị chưa có label: %s — thêm vào labels.platform hoặc --map \"<giá trị>=<label>\"" % ", ".join(sorted(unmapped)))
+    if not a.yes:
+        print("PLAN %d issue — chạy lại với --yes để gắn label%s" % (len(plan), ", --drop-field để xoá field" if a.drop_field else ""))
+        return
+    for n, (label, have) in sorted(plan.items()):
+        if label not in have:
+            http("POST", "/repos/%s/issues/%d/labels" % (a.repo, n), {"labels": [label]})
+    print("OK gắn label cho %d issue" % len(plan))
+    if not a.drop_field:
+        return
+    if foreign:
+        die("không xoá field %s: issue của repo khác trên board còn giá trị (%s)" % (a.field, ", ".join(sorted(foreign))))
+    gql("mutation($f:ID!){ deleteProjectV2Field(input:{fieldId:$f}){ clientMutationId } }", f=fld["id"])
+    print("OK đã xoá field %s" % a.field)
+
+
 def cmd_create(a):
     kind = "organization" if a.owner_type == "org" else "user"
     owner_id = gql("query($l:String!){ %s(login:$l){ id } }" % kind, l=a.owner)[kind]["id"]
@@ -573,6 +628,102 @@ def cmd_checks(a):
     print(json.dumps({"state": state, "sha": sha, "contains": contains, "failed": failed}, ensure_ascii=False))
 
 
+MAX_RERUNS = 2  # re-runs per workflow run: run_attempt 1 is the push itself
+RUN_FAILED = {"failure", "cancelled", "timed_out", "startup_failure"}
+RUN_ACTIVE = {"queued", "in_progress", "waiting", "requested", "pending"}
+
+
+def _origin_slug(root):
+    remote = afconfig.git(["remote", "get-url", "origin"], cwd=root) or ""
+    return remote.rstrip("/").removesuffix(".git").replace("git@github.com:", "").split("github.com/")[-1]
+
+
+def _staging_scope(a):
+    """(config, staging branch) of the repo the command runs in. The workflow commands act on this branch only, and only for
+    the repo of `origin`: the agent passes the slug, the config decides what it may touch."""
+    root = afconfig.repo_root() or "."
+    cfg = afconfig.load_config(root)
+    if cfg is None:
+        die("không có agentflow.yaml ở %s" % root)
+    branch = afconfig.staging_branch(cfg)
+    if not branch:
+        die("staging.branch chưa khai báo")
+    origin = _origin_slug(root)
+    if origin.lower() != a.slug.lower() and http("GET", "/repos/%s" % a.slug)["full_name"].lower() != origin.lower():
+        die("%s không phải repo của origin (%s)" % (a.slug, origin))
+    return cfg, branch
+
+
+def _staging_head(slug, branch):
+    return http("GET", "/repos/%s/commits/%s" % (slug, urllib.parse.quote(branch, safe="")))["sha"]
+
+
+def _branch_runs(slug, branch, head_sha=None):
+    query = "branch=%s&per_page=100" % urllib.parse.quote(branch, safe="")
+    if head_sha:
+        query += "&head_sha=" + head_sha
+    return http("GET", "/repos/%s/actions/runs?%s" % (slug, query)).get("workflow_runs") or []
+
+
+def _picked_runs(a, branch, default):
+    """The run named by --run, which must belong to the staging branch, else the default list."""
+    if not a.run:
+        return default()
+    run = http("GET", "/repos/%s/actions/runs/%d" % (a.slug, a.run))
+    if run.get("head_branch") != branch:
+        die("run %d chạy trên %r, không phải nhánh staging %r — agent chỉ đụng run của staging" % (a.run, run.get("head_branch"), branch))
+    return [run]
+
+
+def _input_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return "" if value is None else str(value)
+
+
+def cmd_dispatch(a):
+    cfg, branch = _staging_scope(a)
+    declared = {w["file"]: w for w in afconfig.staging_workflows(cfg)}
+    if a.workflow not in declared:
+        die("%s không nằm trong staging.workflows (%s) — người khai trong agentflow.yaml" % (a.workflow, ", ".join(declared) or "trống"))
+    body = {"ref": branch}
+    inputs = declared[a.workflow]["inputs"]
+    if inputs:
+        body["inputs"] = {str(k): _input_value(v) for k, v in inputs.items()}
+    http("POST", "/repos/%s/actions/workflows/%s/dispatches" % (a.slug, urllib.parse.quote(a.workflow, safe="")), body)
+    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(json.dumps({"dispatched": a.workflow, "ref": branch, "sha": _staging_head(a.slug, branch), "at": now}, ensure_ascii=False))
+
+
+def cmd_rerun(a):
+    _, branch = _staging_scope(a)
+    runs = _picked_runs(a, branch, lambda: _branch_runs(a.slug, branch, _staging_head(a.slug, branch)))
+    done, skipped = [], []
+    for run in runs:
+        row = {"run": run["id"], "name": run.get("name"), "attempt": run.get("run_attempt") or 1}
+        if run.get("status") != "completed" or run.get("conclusion") not in RUN_FAILED:
+            continue
+        if row["attempt"] > MAX_RERUNS:
+            skipped.append(dict(row, why="đã rerun %d lần" % MAX_RERUNS))
+            continue
+        http("POST", "/repos/%s/actions/runs/%d/rerun-failed-jobs" % (a.slug, run["id"]), {})
+        done.append(row)
+    print(json.dumps({"rerun": done, "skipped": skipped}, ensure_ascii=False))
+
+
+def cmd_cancel(a):
+    _, branch = _staging_scope(a)
+    head = _staging_head(a.slug, branch)
+    runs = _picked_runs(a, branch, lambda: _branch_runs(a.slug, branch))
+    done = []
+    for run in runs:
+        if run.get("status") not in RUN_ACTIVE or run.get("head_sha") == head:
+            continue
+        http("POST", "/repos/%s/actions/runs/%d/cancel" % (a.slug, run["id"]), {})
+        done.append({"run": run["id"], "name": run.get("name"), "sha": (run.get("head_sha") or "")[:7]})
+    print(json.dumps({"cancelled": done, "head": head}, ensure_ascii=False))
+
+
 TRUSTED = ("OWNER", "MEMBER", "COLLABORATOR")
 STATE_BLOCK = re.compile(r"<!--\s*agentflow:state\s*\n(.*?)-->", re.S)
 BODY_MAX = 1500
@@ -705,6 +856,21 @@ def _doctor_staging(slug, branch, ok, warn):
     rules = _branch_rules(slug, branch) & {"pull_request", "required_status_checks", "update"}
     if rules:
         warn("ruleset trên %s (%s) có thể chặn SA push trực tiếp" % (branch, ", ".join(sorted(rules))))
+
+
+def _doctor_workflows(slug, branch, workflows, ok, fail):
+    """Each declared workflow must exist on the staging branch and accept workflow_dispatch, or DEV's dispatch fails."""
+    for wf in workflows:
+        path = "/repos/%s/contents/.github/workflows/%s?ref=%s" % (slug, urllib.parse.quote(wf["file"], safe=""), urllib.parse.quote(branch, safe=""))
+        try:
+            text = base64.b64decode(http("GET", path).get("content") or "").decode(errors="replace")
+        except RuntimeError:
+            fail("staging.workflows: %s không có trên nhánh %s" % (wf["file"], branch))
+            continue
+        if "workflow_dispatch" in text:
+            ok("workflow %s (%s) dispatch được trên %s" % (wf["file"], wf["when"], branch))
+        else:
+            fail("staging.workflows: %s không có trigger workflow_dispatch — DEV không chạy được" % wf["file"])
 
 
 def _doctor_base(slug, base, ok, warn):
@@ -875,22 +1041,22 @@ def cmd_doctor(a):
     elif all(mapping.get(s) in names for s in afconfig.STAGES):
         ok("Status map đủ 7 stage")
     for key, fname in (board.get("fields") or {}).items():
-        (ok if field(proj, fname) else fail)("field %s = %r" % (key, fname))
+        if key != "platform":  # 3.7: a label now; validate_config says how to migrate
+            (ok if field(proj, fname) else fail)("field %s = %r" % (key, fname))
     try:
         wf = gql("query($i:ID!){ node(id:$i){ ... on ProjectV2{ workflows(first:20){ nodes{ name enabled } } } } }", i=proj["id"])
         flows = {w["name"]: w["enabled"] for w in wf["node"]["workflows"]["nodes"]}
         (ok if flows.get("Item closed") else warn)("workflow \"Item closed\" %s" % ("bật" if flows.get("Item closed") else "CHƯA bật — merge xong card không tự sang done (Board → ⋯ → Workflows)"))
     except RuntimeError:
         pass
-    remote = afconfig.git(["remote", "get-url", "origin"], cwd=root) or ""
-    slug = remote.rstrip("/").removesuffix(".git").replace("git@github.com:", "").split("github.com/")[-1]
+    slug = _origin_slug(root)
     if slug.count("/") == 1:
         canonical = http("GET", "/repos/%s" % slug)["full_name"]
         if canonical.lower() != slug.lower():
             warn("remote trỏ %s, canonical là %s" % (slug, canonical))
         repos = [r["nameWithOwner"] for r in proj["repositories"]["nodes"]]
         (ok if canonical in repos else warn)("board %slink với %s" % ("" if canonical in repos else "chưa ", canonical))
-        labels = [x for x in (cfg.get("labels") or {}).values() if x]
+        labels = afconfig.label_names(cfg)
         have, page = set(), 1
         while True:
             batch = http("GET", "/repos/%s/labels?per_page=100&page=%d" % (canonical, page))
@@ -918,6 +1084,7 @@ def cmd_doctor(a):
         else:
             ok("staging branch %s" % stag)
             _doctor_staging(canonical, stag, ok, warn)
+            _doctor_workflows(canonical, stag, afconfig.staging_workflows(cfg), ok, fail)
         if base:
             _doctor_base(canonical, base, ok, warn)
         if not (cfg.get("staging") or {}).get("url"):
@@ -954,6 +1121,9 @@ def main():
         s.add_argument("--allow-drop", action="store_true"); s.add_argument("--yes", action="store_true")
         s.add_argument("--describe", action="store_true", help="ghi đè description bằng mô tả của plugin")
     s = sub.add_parser("ensure-field"); s.add_argument("url"); s.add_argument("--name", required=True); s.add_argument("--options", required=True)
+    s = sub.add_parser("platform-migrate"); s.add_argument("url"); s.add_argument("--repo", required=True)
+    s.add_argument("--field", default="Platform"); s.add_argument("--map", action="append", help="Option=label, lặp được")
+    s.add_argument("--yes", action="store_true"); s.add_argument("--drop-field", action="store_true")
     s = sub.add_parser("create")
     for flag in ("--owner", "--title", "--repo", "--want"):
         s.add_argument(flag, required=True)
@@ -971,6 +1141,9 @@ def main():
     s.add_argument("--wait", type=float, default=0, help="số phút chờ thêm khi còn pending")
     s.add_argument("--since", help="deploy_at: check xanh trong 2 phút đầu vẫn tính là pending")
     s.add_argument("--skip", action="append", help="glob tên check không chờ (staging.skip_checks, vd release mobile); lặp được")
+    s = sub.add_parser("dispatch"); s.add_argument("slug"); s.add_argument("--workflow", required=True, help="tên file trong staging.workflows")
+    for name in ("rerun", "cancel"):
+        s = sub.add_parser(name); s.add_argument("slug"); s.add_argument("--run", type=int, help="id run trên nhánh staging")
     s = sub.add_parser("feedback"); s.add_argument("slug"); s.add_argument("--issue", type=int, action="append", required=True)
     s.add_argument("--summary", action="store_true", help="một dòng mỗi issue: pr + số mục chờ DEV")
     s = sub.add_parser("doctor"); s.add_argument("--root")
@@ -978,6 +1151,7 @@ def main():
     a = p.parse_args()
     handler = {"whoami": cmd_whoami, "inspect": cmd_inspect, "items": cmd_items, "status-plan": cmd_status_plan,
                "status-apply": cmd_status_apply, "ensure-field": cmd_ensure_field, "create": cmd_create,
+               "platform-migrate": cmd_platform_migrate, "dispatch": cmd_dispatch, "rerun": cmd_rerun, "cancel": cmd_cancel,
                "labels": cmd_labels, "repo": cmd_repo, "milestones": cmd_milestones, "issue-types": cmd_issue_types, "metrics": cmd_metrics, "checks": cmd_checks,
                "feedback": cmd_feedback, "doctor": cmd_doctor, "preflight": cmd_preflight}[a.cmd]
     try:

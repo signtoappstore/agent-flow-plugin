@@ -29,6 +29,10 @@ DIRECT = [
     ("BLOCK", "gh pr merge 12 --squash"), ("BLOCK", "gh api -X PUT repos/o/r/pulls/12/merge"),
     ("BLOCK", "gh pr review 12 --approve"), ("BLOCK", "gh workflow run web-release.yml"),
     ("BLOCK", "gh run rerun 123"), ("ALLOW", "gh run list --branch feat/1-x"),
+    ("BLOCK", "gh run cancel 123"), ("BLOCK", "gh api -X POST repos/o/r/actions/runs/9/cancel"),
+    ("BLOCK", "gh api -X POST repos/o/r/actions/runs/9/rerun-failed-jobs"),
+    ("ALLOW", "agentflow-board dispatch o/r --workflow deploy-staging.yml"), ("ALLOW", "agentflow-board rerun o/r"),
+    ("ALLOW", "agentflow-board cancel o/r --run 9"),
     ("BLOCK", "cat secret/staging/app.env"), ("BLOCK", "cd .claude/worktrees/af-7 && cat secret/app.env"),
     ("BLOCK", "grep KEY .env | head"), ("BLOCK", "cat .claude/settings.local.json"),
     ("ALLOW", "cat .env.example"), ("ALLOW", "cp .env.example .env"),
@@ -180,6 +184,12 @@ MCP = [
 STAGING_WT = ".claude/worktrees/af-7-staging"
 ROLES = [  # role, want, tool, input
     ("dev", "BLOCK", "Bash", {"command": "mv web/src/app.ts .claude/worktrees/af-7/app.ts"}),
+    ("dev", "ALLOW", "Bash", {"command": "agentflow-board dispatch o/r --workflow deploy-staging.yml"}),
+    ("dev", "ALLOW", "Bash", {"command": "agentflow-board rerun o/r && agentflow-board cancel o/r"}),
+    ("sa", "BLOCK", "Bash", {"command": "agentflow-board dispatch o/r --workflow deploy-staging.yml"}),
+    ("sa", "BLOCK", "Bash", {"command": "agentflow-board rerun o/r --run 9"}),
+    ("sa", "ALLOW", "Bash", {"command": "agentflow-board checks o/r --branch staging"}),
+    ("dev", "BLOCK", "Bash", {"command": "agentflow-board platform-migrate https://github.com/orgs/o/projects/1 --repo o/r --yes"}),
     ("dev", "ALLOW", "Bash", {"command": "cd .claude/worktrees/af-7 && mv a.ts b.ts"}),
     ("sa", "BLOCK", "Bash", {"command": "git push origin feat/1"}),
     ("sa", "BLOCK", "Bash", {"command": "git merge origin/feat/1"}),

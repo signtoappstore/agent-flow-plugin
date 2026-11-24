@@ -21,7 +21,7 @@ Prompt có: `REPO`, `ISSUE: #<n>`, `ITEM_ID`, `MODE` (`new` · `rework` · `resu
 - `agentflow.yaml` (schema gate).
 - `issue_read method=get` → body, type/label, assignee, state block. `issue_read method=get_comments` → `[AF:SA] design` mới nhất (giải pháp, rủi ro, test case), verdict mới nhất mỗi role, comment của người sau đó (protocol §5).
 - `agentflow-board feedback <REPO> --issue <n>` → `pr`, `branch` (của state block, không có thì của PR mở duy nhất link tới issue, kể cả PR người mở) + góp ý của người trên PR: `pending` (thread chưa trả lời, Request changes), `notes` (review, comment sau `fb`). Có `prs` = nhiều PR mở ⇒ `needs_info` hỏi PR nào. Lệnh lỗi ⇒ đọc `pull_request_read` `get_review_comments`, `get_reviews`, `get_comments`, lọc theo protocol §5.
-- Surface bị chạm: theo thiết kế, field Platform ↔ `surfaces.<key>.platform`. Không có `surfaces` ⇒ toàn repo.
+- Surface bị chạm: theo thiết kế, label `labels.platform` ↔ `surfaces.<key>.platform`. Không có `surfaces` ⇒ toàn repo.
 
 ## 2. Thiết kế là đầu vào
 
@@ -83,10 +83,11 @@ git worktree remove --force "$WT"
 
 - **Conflict**: giải trong `$WT` giữ đúng ý cả hai phía (không xoá code của ticket khác), `git add`, `git commit --no-edit`, chạy tiếp từ bước push. Không chắc ⇒ `git merge --abort`, dọn worktree, `[AF:DEV] blocked` + file + nhánh ticket liên quan. Không bao giờ merge staging vào nhánh ticket.
 - Push thành công ⇒ state (chỉ sửa) `deploy_sha`, `deploy_at: <ISO-8601 UTC bây giờ>`. `Already up to date` (staging đã có nhánh) ⇒ giữ hai key cũ.
+- **Workflow staging** — tự làm, không hỏi người, chỉ qua `agentflow-board` (hook chặn lối khác): push thành công ⇒ `agentflow-board cancel <REPO>` (huỷ run cũ đang chạy), rồi `agentflow-board dispatch <REPO> --workflow <file>` cho mỗi mục `staging.workflows` có `when: push`. `when: need` ⇒ dispatch khi cần (vd build app staging khi code mobile đổi), ghi workflow + lý do vào comment `[AF:DEV]` kế tiếp.
 - **Tách lượt**: `MODE` `new`/`rework`, push staging xong và còn flow phải chạy ⇒ state (chỉ sửa) `next: DEV verify trên staging`, `RESULT: in_progress · verify`, dừng — lượt `MODE=verify` làm tiếp. Không có flow ⇒ §8 luôn.
 - **Chờ deploy** khi diff `<test_sha>..origin/<branch>` (thiếu `test_sha`: cả PR) chạm code server/web, kể cả khi merge `Already up to date`; chỉ `e2e_dir` hay mobile ⇒ không chờ:
   `agentflow-board checks <REPO> --branch <staging.branch> --contains <deploy_sha> --since <deploy_at> --wait 2.5` + `--skip '<glob>'` cho mỗi mục `staging.skip_checks`, Bash `timeout: 170000` (protocol §9); lặp tới khi hết `pending`, giữa các lần build/cài app. `contains: false` ⇒ người reset staging: deploy lại. Chờ quá `staging.timeout_min` trong lượt này ⇒ `[AF:DEV] blocked` pipeline-timeout + sha.
-  `failure` ⇒ log: `actions_list method=list_workflow_runs` theo head → `get_job_logs failed_only=true return_content=true tail_lines=200`. Do diff của ticket ⇒ sửa (tính một vòng); do hạ tầng, ticket khác (`git log origin/<base>..origin/<staging.branch> --merges --oneline`) hoặc không xác định ⇒ `[AF:DEV] blocked` + check + đoạn log.
+  `failure` ⇒ log: `actions_list method=list_workflow_runs` theo head → `get_job_logs failed_only=true return_content=true tail_lines=200`. Do diff của ticket ⇒ sửa (tính một vòng); do ticket khác (`git log origin/<base>..origin/<staging.branch> --merges --oneline`) hoặc không xác định ⇒ `[AF:DEV] blocked` + check + đoạn log; do hạ tầng/flaky (runner, mạng, tải deps) ⇒ `agentflow-board rerun <REPO>` rồi chờ lại, không tính vòng (≤ 2 lần mỗi run, quá thì `skipped` ⇒ blocked như trên).
 - **Chạy flow liên quan** trên staging theo `automation.md` §Chạy (mobile: build staging cài lên emulator, trỏ server staging).
 
 **Vòng sửa** — fail ⇒ phân định (`automation.md` §Phân định): do test ⇒ sửa flow / gắn id; do code ⇒ sửa code. Commit, push, deploy lại, chạy lại flow fail + flow liên quan phần vừa sửa. Tối đa `run.max_test_rounds` vòng mỗi lượt; lỗi hạ tầng, ticket khác không tính vòng.

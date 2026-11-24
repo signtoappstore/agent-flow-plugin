@@ -503,11 +503,180 @@ class Doctor(BoardCase):
         self.assertEqual(code, 1)
         self.assertIn("push lên origin không được", out)
 
+    def test_declared_workflow_must_exist_and_accept_dispatch(self):
+        import base64
+        self.write_config(CONFIG.replace('staging: {branch: staging, url: "https://s.example"}',
+                                         'staging:\n  branch: staging\n  url: "https://s.example"\n  workflows:\n    - {file: deploy.yml, when: push}\n    - {file: apk.yml, when: need}'))
+        for name, text in (("deploy.yml", b"on:\n  workflow_dispatch:\n"), ("apk.yml", b"on:\n  push:\n")):  # ahead of the /repos/acme/app route
+            self.gh.routes.insert(0, ("GET", "/contents/.github/workflows/" + name, {"content": base64.b64encode(text).decode()}, 200, {}))
+        code, out = self.doctor()
+        self.assertEqual(code, 1, out)
+        self.assertIn("✓ workflow deploy.yml (push) dispatch được trên staging", out)
+        self.assertIn("apk.yml không có trigger workflow_dispatch", out)
+
+    def test_platform_labels_must_exist(self):
+        self.write_config(CONFIG.replace("qc_manual: qc-manual}", "qc_manual: qc-manual, platform: {web: \"platform:web\"}}"))
+        code, out = self.doctor()
+        self.assertEqual(code, 1, out)
+        self.assertIn("labels thiếu: platform:web", out)
+
     def test_legacy_e2e_ci_warns(self):
         os.makedirs(os.path.join(self.repo, "web"))
         self.write_config(CONFIG + 'surfaces:\n  web:\n    path: "web/"\n    check: "true"\n    e2e_ci: true\n')
         code, out = self.doctor()
         self.assertIn("e2e_ci không còn dùng", out)
+
+
+class StagingWorkflows(BoardCase):
+    """dispatch / rerun / cancel: only the staging branch, only declared workflows, re-runs capped."""
+
+    CFG = CONFIG.replace('staging: {branch: staging, url: "https://s.example"}', """staging:
+  branch: staging
+  workflows:
+    - file: deploy-staging.yml
+      when: push
+      inputs: {env: staging, debug: false}""")
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = os.path.realpath(self.tmp.name)
+        subprocess.run(["git", "init", "-q", "-b", "master"], cwd=self.repo, check=True)
+        with open(os.path.join(self.repo, "agentflow.yaml"), "w") as fh:
+            fh.write(self.CFG)
+        real_git = afconfig.git
+
+        def fake_git(args, cwd=None, timeout=5):
+            if args[:2] == ["remote", "get-url"]:
+                return "git@github.com:acme/app.git"
+            return real_git(args, cwd=cwd, timeout=timeout)
+        for patcher in (mock.patch.object(afconfig, "git", fake_git), mock.patch.object(afconfig, "repo_root", lambda cwd=None: self.repo)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.gh.on("GET", "/commits/staging", {"sha": SHA})
+
+    def posts(self):
+        return [(url, json.loads(data) if data else None) for method, url, data in self.gh.calls if method == "POST"]
+
+    def run_(self, id_, branch="staging", status="completed", conclusion="failure", attempt=1, sha=SHA):
+        return {"id": id_, "name": "deploy", "head_branch": branch, "status": status, "conclusion": conclusion, "run_attempt": attempt, "head_sha": sha}
+
+    def test_dispatch_declared_workflow_on_staging_with_config_inputs(self):
+        self.gh.on("POST", "/actions/workflows/deploy-staging.yml/dispatches", {}, status=204)
+        code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "deploy-staging.yml")
+        self.assertEqual(code, 0, out)
+        url, body = self.posts()[0]
+        self.assertEqual(body, {"ref": "staging", "inputs": {"env": "staging", "debug": "false"}})
+        self.assertEqual(json.loads(out)["sha"], SHA)
+
+    def test_undeclared_workflow_is_refused(self):
+        code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "release-production.yml")
+        self.assertEqual(code, 1)
+        self.assertIn("không nằm trong staging.workflows", out)
+        self.assertEqual(self.posts(), [])
+
+    def test_other_repo_is_refused(self):
+        self.gh.on("GET", "/repos/evil/app", {"full_name": "evil/app"})
+        code, out = self.run_cmd("dispatch", "evil/app", "--workflow", "deploy-staging.yml")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.posts(), [])
+
+    def test_rerun_failed_runs_of_the_head_up_to_the_cap(self):
+        self.gh.on("GET", "/actions/runs?branch=staging", {"workflow_runs": [
+            self.run_(1), self.run_(2, attempt=3), self.run_(3, conclusion="success"), self.run_(4, status="in_progress", conclusion=None)]})
+        self.gh.on("POST", "/rerun-failed-jobs", {}, status=201)
+        code, out = self.run_cmd("rerun", "acme/app")
+        self.assertEqual(code, 0, out)
+        res = json.loads(out)
+        self.assertEqual([r["run"] for r in res["rerun"]], [1])
+        self.assertEqual([r["run"] for r in res["skipped"]], [2])
+        self.assertIn("head_sha=" + SHA, [u for m, u, d in self.gh.calls if "/actions/runs?" in u][0])
+
+    def test_run_of_another_branch_is_refused(self):
+        self.gh.on("GET", "/actions/runs/7", self.run_(7, branch="master"))
+        for cmd in ("rerun", "cancel"):
+            with self.subTest(cmd):
+                code, out = self.run_cmd(cmd, "acme/app", "--run", "7")
+                self.assertEqual(code, 1)
+                self.assertIn("không phải nhánh staging", out)
+        self.assertEqual(self.posts(), [])
+
+    def test_cancel_only_unfinished_runs_of_older_commits(self):
+        old = "b" * 40
+        self.gh.on("GET", "/actions/runs?branch=staging", {"workflow_runs": [
+            self.run_(1, status="in_progress", conclusion=None, sha=old), self.run_(2, status="in_progress", conclusion=None),
+            self.run_(3, status="completed", conclusion="success", sha=old)]})
+        self.gh.on("POST", "/cancel", {}, status=202)
+        code, out = self.run_cmd("cancel", "acme/app")
+        self.assertEqual(code, 0, out)
+        self.assertEqual([r["run"] for r in json.loads(out)["cancelled"]], [1])
+        self.assertEqual([u.rsplit("/", 2)[-2] for u, _ in self.posts()], ["1"])
+
+
+class PlatformMigrate(BoardCase):
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = os.path.realpath(self.tmp.name)
+        with open(os.path.join(self.repo, "agentflow.yaml"), "w") as fh:
+            fh.write("labels:\n  platform: {mobile: \"platform:mobile\", web: \"platform:web\"}\n")
+        patcher = mock.patch.object(afconfig, "repo_root", lambda cwd=None: self.repo)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        fields = [{"__typename": "ProjectV2SingleSelectField", "id": "FP", "name": "Platform", "dataType": "SINGLE_SELECT", "options": []}]
+        project = {"id": "P", "title": "T", "url": URL, "shortDescription": "", "closed": False, "items": {"totalCount": 2},
+                   "repositories": {"nodes": []}, "views": {"nodes": []}, "fields": {"nodes": fields}}
+        self.gh.on("POST", "shortDescription", {"data": {"organization": {"projectV2": project}}})
+        self.gh.on("POST", "deleteProjectV2Field", {"data": {"deleteProjectV2Field": {"clientMutationId": None}}})
+        self.gh.on("POST", "/issues/", [])
+
+    def items(self, *rows):
+        nodes = [{"id": "I%d" % n, "type": "ISSUE", "f0": {"name": value} if value else None,
+                  "content": {"number": n, "title": "t", "state": "OPEN", "repository": {"nameWithOwner": repo},
+                              "labels": {"nodes": [{"name": x} for x in labels]}, "assignees": {"nodes": []}}}
+                 for n, value, repo, labels in rows]
+        self.gh.on("POST", "fieldValueByName", {"data": {"organization": {"projectV2": {"items": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}})
+
+    def migrate(self, *flags):
+        return self.run_cmd("platform-migrate", URL, "--repo", "acme/app", *flags)
+
+    def label_posts(self):
+        return [(url, json.loads(data)) for method, url, data in self.gh.calls if method == "POST" and "/labels" in url]
+
+    def test_plan_writes_nothing(self):
+        self.items((1, "Mobile", "acme/app", []), (2, "Web", "acme/app", ["platform:web"]), (3, None, "acme/app", []))
+        code, out = self.migrate("--drop-field")
+        self.assertEqual(code, 0, out)
+        self.assertIn("#1 platform:mobile", out)
+        self.assertIn("#2 platform:web (đã có)", out)
+        self.assertEqual(self.label_posts(), [])
+        self.assertNotIn("deleteProjectV2Field", "".join((d or b"").decode() for _, _, d in self.gh.calls))
+
+    def test_apply_labels_then_drops_the_field(self):
+        self.items((1, "Mobile", "acme/app", []), (2, "Web", "acme/app", ["platform:web"]))
+        code, out = self.migrate("--yes", "--drop-field")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.label_posts(), [("https://api.github.com/repos/acme/app/issues/1/labels", {"labels": ["platform:mobile"]})])
+        self.assertIn("OK đã xoá field Platform", out)
+
+    def test_value_without_label_stops_before_writing(self):
+        self.items((1, "Backend", "acme/app", []))
+        code, out = self.migrate("--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("Backend", out)
+        self.assertEqual(self.label_posts(), [])
+        code, out = self.migrate("--yes", "--map", "Backend=platform:backend")
+        self.assertEqual(code, 0, out)
+
+    def test_shared_board_keeps_the_field_of_other_repos(self):
+        self.items((1, "Mobile", "acme/app", []), (2, "Web", "acme/other", []))
+        code, out = self.migrate("--yes", "--drop-field")
+        self.assertEqual(code, 1)
+        self.assertIn("repo khác", out)
+        self.assertEqual(len(self.label_posts()), 1)
 
 
 class Preflight(unittest.TestCase):

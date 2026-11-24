@@ -21,7 +21,6 @@ board:
   fields:
     priority: "Priority"       # option đầu tiên = ưu tiên cao nhất
     size: "Size"               # option cuối (vd XL) = phải tách trước khi làm
-    platform: "Platform"
 
 # ── PHÂN LOẠI ISSUE ──────────────────────────────────────────────────────────
 classify: issue-type           # issue-type (issue type của org) | label
@@ -39,6 +38,11 @@ labels:
   changes_requested: "changes-requested" # SA review trả về — DEV sửa
   qc_failed: "qc-failed"                 # QC người trả về — DEV sửa
   qc_manual: "qc-manual"                 # chờ QC người test tay theo checklist
+  # Nền tảng ticket chạm — một issue gắn được nhiều label. Key = tên nền tảng mà surfaces.<key>.platform trỏ tới.
+  platform:
+    mobile: "platform:mobile"
+    web: "platform:web"
+    backend: "platform:backend"
 
 # ── GIT ──────────────────────────────────────────────────────────────────────
 git:
@@ -53,7 +57,7 @@ git:
 # surfaces:
 #   web:
 #     path: "web/"
-#     platform: "Web"          # option của field Platform ứng với surface
+#     platform: "web"          # key của labels.platform ứng với surface
 #     check: "pnpm typecheck && pnpm lint"
 #     test: "pnpm test"
 #     e2e: ""                  # tuỳ chọn — lệnh chạy cả suite e2e nhắm vào staging, có env STAGING_URL, vd "BASE_URL=$STAGING_URL pnpm e2e"
@@ -84,6 +88,13 @@ staging:
   notes: ""                    # app id, tài khoản/dữ liệu test: path secret folder của project (gitignored), vd "secret/staging/" — agent đọc file trong đó
   timeout_min: 30              # pipeline quá thời gian này ⇒ blocked, báo người
   skip_checks: []              # glob tên check DEV không chờ — release mobile, vd ["distribute-mobile*", "testflight*"]
+  # Workflow DEV tự dispatch trên staging.branch, không hỏi người: ref luôn là staging, inputs chỉ lấy ở đây. Rerun job fail
+  # (≤ 2 lần mỗi run) và cancel run cũ áp cho mọi run của nhánh staging, không cần khai. Không khai workflow deploy production.
+  workflows: []
+  #  - file: "deploy-staging.yml"
+  #    when: push               # push = dispatch sau mỗi lần DEV push staging (pipeline không tự chạy khi push)
+  #                             # need = chỉ khi cần, vd build app staging khi code mobile đổi
+  #    inputs: { env: staging } # tuỳ chọn — giá trị cố định
 
 # ── LÀM RÕ YÊU CẦU ───────────────────────────────────────────────────────────
 # auto = agent tự phân tích, chọn phương án tốt nhất và hợp nhất, ghi quyết định + căn cứ để người soát sau.

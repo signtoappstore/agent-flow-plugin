@@ -37,7 +37,7 @@ Thứ tự hỏi, dừng khi mục đã rõ: **vấn đề** (ai gặp, lúc nà
 - Field `required` của form. Feature: vấn đề, user story, chỉ số thành công. Improvement: hiện trạng có số đo, mục tiêu có ngưỡng, hành vi không đổi. Bug: bước tái hiện, mong đợi vs thực tế (text lỗi chính xác), mức độ, tần suất, môi trường/thiết bị, bằng chứng; không tái hiện, không bằng chứng → ghi rõ, gắn `needs_info`.
 - Khía cạnh người dùng: đường lỗi + trạng thái (mất mạng, lỗi, rỗng, loading, nhập sai, giới hạn) · ai dùng được (vai trò, chưa đăng nhập) · dữ liệu, người dùng bản cũ · thông báo, ngôn ngữ · tracking · tốc độ chấp nhận (ngưỡng) · dữ liệu nhạy cảm.
 - Design khi có UI (thiếu state nào thì hỏi), Ngoài phạm vi, Hướng dẫn cho QC (dữ liệu, tài khoản, thiết bị).
-- Board: Priority (giá trị × khẩn cấp), Size (số AC, màn, vai trò; SA kiểm lại), Platform; assignee (gợi ý login `get_me`); milestone khi có milestone mở (gợi ý gần hạn).
+- Board: Priority (giá trị × khẩn cấp), Size (số AC, màn, vai trò; SA kiểm lại); **nền tảng** = một hoặc nhiều label `labels.platform` (multiSelect) theo nơi người dùng dùng (app → mobile, web → web), việc chỉ ở server không có màn → backend, issue từ form theo mục Nền tảng; SA bổ sung khi thiết kế; assignee (gợi ý login `get_me`); milestone khi có milestone mở (gợi ý gần hạn).
 
 Hỏi hết điểm mở trước khi soạn. **Nguồn**: mỗi ý trong body từ lời PO hoặc tài liệu; luật, con số, ngưỡng bạn tự đặt (cả đo thành công) chỉ nằm ở `Chưa rõ: <câu hỏi>` tới khi PO chọn, kể cả PO nói "xong".
 
@@ -65,19 +65,19 @@ Luật AC: mỗi dòng **một** hành vi kiểm được, kết quả quan sát
 
 **Chấm trước khi trình** (một dòng ✓/✗ mỗi mục): vấn đề rõ · giá trị đo được · đúng vai trò · AC kiểm được · có đường lỗi · có Ngoài phạm vi · không code/thuật ngữ kỹ thuật · mỗi ý từ PO/tài liệu · chỉ dẫn tài liệu, khi cần · vừa cỡ (≤ 7 AC; ✗ → hỏi Cấu trúc) · độc lập hoặc ghi phụ thuộc. ✗ → đề xuất sửa.
 
-**Trình bản nháp**: tiêu đề, body, type, Priority/Size/Platform, assignee, milestone, bảng chấm, mục `Chưa rõ`, cổng Ready (§6) đạt/thiếu gì → chờ PO duyệt hoặc sửa; chưa duyệt chưa ghi.
+**Trình bản nháp**: tiêu đề, body, type, Priority/Size, label nền tảng, assignee, milestone, bảng chấm, mục `Chưa rõ`, cổng Ready (§6) đạt/thiếu gì → chờ PO duyệt hoặc sửa; chưa duyệt chưa ghi.
 
 ## 5. Ghi
 
-1. Mode mới: `issue_write method=create` (title, body, type = issue type nếu `classify: issue-type`, không thì label tên type; `assignees`, `milestone`, `parent_issue_number` khi là sub-issue). Mode `#n`: `issue_write method=update` (body, assignees, milestone), giữ nguyên state block; đọc lại body trước khi ghi, khác bản đã đọc → không ghi đè, báo PO.
-2. Mode mới: `add_project_item` → Status = `board.status.backlog`. Cả hai mode: Priority/Size/Platform đã chốt (`updated_field={name: <fields.*>, value: <option>}`).
+1. Mode mới: `issue_write method=create` (title, body, type = issue type nếu `classify: issue-type`, không thì label tên type; `labels` + label nền tảng; `assignees`, `milestone`, `parent_issue_number` khi là sub-issue). Mode `#n`: `issue_write method=update` (body, assignees, milestone, `labels` = hiện tại ∪ nền tảng đã chốt), giữ nguyên state block; đọc lại body trước khi ghi, khác bản đã đọc → không ghi đè, báo PO.
+2. Mode mới: `add_project_item` → Status = `board.status.backlog`. Cả hai mode: Priority/Size đã chốt (`updated_field={name: <fields.*>, value: <option>}`).
 3. Write fail → **không nuốt lỗi**: báo `#n` đã tạo + lỗi + `/agentflow:doctor`, dừng.
 
 ## 6. Cổng Ready
 
 Chỉ chuyển sang `ready` khi đủ cả:
 - Field `required` có nội dung, không còn `Chưa rõ`, ≥ 1 dòng `- [ ]`, mọi AC phán được đúng/sai.
-- Priority, Size, Platform có giá trị (field có trong config); Size không phải option cuối.
+- Priority, Size có giá trị (field có trong config); Size không phải option cuối; ≥ 1 label `labels.platform` (khi config có).
 - Có assignee; có milestone khi repo có milestone mở.
 - Không `Bị chặn bởi #m` với #m còn mở; không phải issue cha có sub-issue (`issue_read method=get_sub_issues`); không `blocked`; `needs_info` chỉ khi câu hỏi đã được trả lời trong body (gỡ ở §7).
 

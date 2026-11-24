@@ -34,17 +34,27 @@ Field tuỳ chọn thiếu:
 ```bash
 agentflow-board ensure-field <url> --name Priority --options P0,P1,P2,P3
 agentflow-board ensure-field <url> --name Size --options XS,S,M,L,XL
-agentflow-board ensure-field <url> --name Platform --options <platform của từng surface>
 ```
 
 Không muốn field nào → xoá key tương ứng trong `board.fields`.
+
+## Platform
+
+Nền tảng là label `labels.platform` (một issue gắn nhiều được), không còn field. Board còn field Platform → sau khi tạo label:
+
+```bash
+agentflow-board platform-migrate <url> --repo <owner/repo> [--map "<option>=<label>"] --drop-field         # plan, không ghi
+agentflow-board platform-migrate <url> --repo <owner/repo> [--map "<option>=<label>"] --yes --drop-field   # người duyệt plan
+```
+
+Option khớp key `labels.platform` không phân biệt hoa thường; option khác cần `--map`. Board chung mà issue repo khác còn giá trị ⇒ giữ field. Xoá key `platform` khỏi `board.fields`.
 
 ## Tạo board mới (preset)
 
 ```bash
 agentflow-board create --owner <owner> --owner-type <org|user> --title "<Tên dự án>" --repo <owner/repo> \
   --want "Backlog,Ready,In Progress,In Review,In QC,Ready to Merge,Done" \
-  --field "Priority=P0,P1,P2,P3" --field "Size=XS,S,M,L,XL" --field "Platform=<a,b,…>" \
+  --field "Priority=P0,P1,P2,P3" --field "Size=XS,S,M,L,XL" \
   [--sprint 14] --description "<mô tả ngắn>" --readme <file README đã điền>
 ```
 
@@ -63,6 +73,8 @@ Sau khi tạo: Settings → Workflows của board — bật **Item closed → St
 | `qc_failed` | qc-failed | E99695 | QC người trả về — DEV xem comment lỗi |
 | `qc_manual` | qc-manual | C5DEF5 | Chờ QC người test mục QC tay của PR trên staging |
 
+`labels.platform`: mobile → platform:mobile (5319E7), web → platform:web (0075CA), backend → platform:backend (006B75), mô tả "Nền tảng: <key>".
+
 Repo đã có label cùng ý nghĩa khác tên → dùng tên sẵn có trong `labels` (không tạo trùng). Mô tả tối đa 100 ký tự (GitHub từ chối).
 
 `classify: label` → tạo thêm một label cho mỗi key trong `types` (màu 0E8A16).
@@ -71,7 +83,7 @@ Repo đã có label cùng ý nghĩa khác tên → dùng tên sẵn có trong `l
 
 Chỉ scaffold khi repo **chưa có** — có rồi thì giữ nguyên:
 
-- `.github/ISSUE_TEMPLATE/` ← `${CLAUDE_PLUGIN_ROOT}/templates/ISSUE_TEMPLATE/*.yml`. Thay `{{PROJECT}}` = `<owner>/<number>` của board (form tự thêm issue vào board), `{{PLATFORMS}}` = danh sách platform. `classify: label` → đổi dòng `type:` thành `labels: [<tên type>]`.
+- `.github/ISSUE_TEMPLATE/` ← `${CLAUDE_PLUGIN_ROOT}/templates/ISSUE_TEMPLATE/*.yml`. Thay `{{PROJECT}}` = `<owner>/<number>` của board (form tự thêm issue vào board), `{{PLATFORM_OPTIONS}}` = mỗi key `labels.platform` một dòng `        - <key>` (form chỉ ghi vào body; `/task`, SA gắn label theo đó). `classify: label` → đổi dòng `type:` thành `labels: [<tên type>]`.
 - `.github/pull_request_template.md` ← `${CLAUDE_PLUGIN_ROOT}/templates/pull_request_template.md`, thay `{{LINK}}` = `git.link`.
 
 Ghi file vào working tree (người tự commit) — init không commit, không push.

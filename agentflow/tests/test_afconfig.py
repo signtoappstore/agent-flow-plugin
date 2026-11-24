@@ -105,6 +105,12 @@ class Validate(unittest.TestCase):
             (lambda c: c["staging"].update(skip_checks=[""]), "staging.skip_checks"),
             (lambda c: c["clarify"].update(implement="manual"), "clarify.implement"),
             (lambda c: c.update(clarify="ask"), "clarify phải là map"),
+            (lambda c: c["labels"].update(platform=["platform:web"]), "labels.platform"),
+            (lambda c: c["staging"].update(workflows={"file": "x.yml"}), "staging.workflows phải là danh sách"),
+            (lambda c: c["staging"].update(workflows=[{"file": "../deploy.yml", "when": "push"}]), "staging.workflows[0].file"),
+            (lambda c: c["staging"].update(workflows=[{"file": "deploy.yml", "when": "always"}]), "staging.workflows[0].when"),
+            (lambda c: c["staging"].update(workflows=[{"file": "d.yml", "when": "push"}, {"file": "d.yml", "when": "need"}]), "khai hai lần"),
+            (lambda c: c["staging"].update(workflows=[{"file": "d.yml", "when": "push", "inputs": {"a": [1]}}]), "inputs"),
         ]
         for change, needle in cases:
             cfg = filled_config()
@@ -119,6 +125,22 @@ class Validate(unittest.TestCase):
         warns = [m for level, m in afconfig.validate_config(cfg) if level == "warn"]
         self.assertTrue(any("oops" in m for m in warns))
         self.assertTrue(any("git.protected" in m for m in warns))
+
+    def test_platform_labels_and_staging_workflows(self):
+        cfg = filled_config()
+        cfg["staging"]["workflows"] = [{"file": "deploy-staging.yml", "when": "push", "inputs": {"env": "staging"}}, {"file": "apk.yaml", "when": "need"}]
+        cfg["surfaces"] = {"app": {"path": "mobile/", "platform": "Mobile"}, "site": {"path": "web/", "platform": "desktop"}}
+        cfg["board"]["fields"] = {"priority": "Priority", "platform": "Platform"}
+        self.assertEqual(self.problems(cfg), [])
+        warns = [m for level, m in afconfig.validate_config(cfg) if level == "warn"]
+        self.assertTrue(any("board.fields.platform" in m and "platform-migrate" in m for m in warns), warns)
+        self.assertTrue(any("surfaces.site.platform" in m for m in warns), warns)
+        self.assertFalse(any("surfaces.app" in m for m in warns), warns)
+        self.assertEqual([w["file"] for w in afconfig.staging_workflows(cfg)], ["deploy-staging.yml", "apk.yaml"])
+        self.assertIn("platform:backend", afconfig.label_names(cfg))
+        del cfg["labels"]["platform"]
+        self.assertTrue(any("labels.platform chưa khai" in m for level, m in afconfig.validate_config(cfg)))
+        self.assertEqual(afconfig.platform_labels(cfg), {})
 
     def test_clarify_is_optional_and_unknown_gate_only_warns(self):
         cfg = filled_config()
