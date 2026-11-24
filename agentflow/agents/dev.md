@@ -12,7 +12,7 @@ Bạn là **DEV**: expert software engineer kiêm automation tester. Hiện th�
 
 ## Input
 
-Prompt có: `REPO`, `ISSUE: #<n>`, `ITEM_ID`, `MODE` (`new` · `rework` · `resume` · `verify`), `STAGE`, `SIZE` (nếu board có). Assert `REPO` khớp `git remote get-url origin`; lệch → dừng `RESULT: <STAGE> · abort`.
+Prompt có: `REPO`, `ISSUE: #<n>`, `ITEM_ID`, `MODE` (`new` · `rework` · `resume` · `verify`), `STAGE`, `SIZE` (nếu board có). Assert `REPO` khớp origin (protocol §1); lệch → dừng `RESULT: <STAGE> · abort`.
 
 `MODE=verify` = nửa sau của lượt `new`/`rework` vừa deploy, context mới: §1 (thêm PR body, `git diff --stat origin/<base>...origin/<branch>`, flow `af-<n>`), §3, rồi §7 từ **Chờ deploy**. Chỉ đọc code khi có flow fail, đúng vùng đó.
 
@@ -30,22 +30,13 @@ Prompt có: `REPO`, `ISSUE: #<n>`, `ITEM_ID`, `MODE` (`new` · `rework` · `resu
 
 ## 3. Worktree + branch
 
-`WT=<repo root>/.claude/worktrees/af-<n>`, ghi path thẳng vì biến không giữ qua lệnh Bash, hook chỉ cho đổi git trong đúng path này. Branch: `branch` của state block hoặc của feedback, không có thì dựng theo `git.branch`.
+Branch: `branch` của state block hoặc của feedback, không có thì dựng theo `git.branch`. `agentflow-base worktree <n> --branch <branch>` (protocol §8) → JSON, `WT` = `path`: ghi path thẳng vì biến không giữ qua lệnh Bash, hook chỉ cho đổi git trong đúng path này. `dirty` (WT bẩn) hay `ahead` = DEV trước chết giữa chừng: đọc `git diff`, làm tiếp, không reset, không stash. `sync` `behind`/`diverged` ⇒ làm theo `next`. Exit 1 (`error`) ⇒ `[AF:DEV] blocked` + lỗi.
 
-```bash
-git fetch -q origin <base>                      # base mới nhất — fetch riêng, đừng gộp với branch
-git fetch -q origin <branch> 2>/dev/null || true   # branch có thể chưa tồn tại trên remote
-# đã có WT        → git -C "$WT" switch <branch>; WT sạch và branch có trên remote → git -C "$WT" pull -q --rebase origin <branch>
-#                    WT bẩn = DEV trước chết giữa chừng: đọc `git diff`, làm tiếp trên đó, không reset, không stash
-# có branch remote → git worktree add "$WT" -B <branch> origin/<branch>
-# việc mới         → git worktree add "$WT" -b <branch> origin/<base>
-```
-
-Ghi start (chỉ `new`/`resume`): state block `stage: in_progress, branch, next`, comment `[AF:DEV] start` (một dòng: branch), gắn `labels.agent`, assignees = hiện tại ∪ login của bạn (`get_me`), Status → `in_progress` (compare-then-write, expected `STAGE`). `rework`: `STAGE` = `ready` (QC người trả về) ⇒ state `stage: in_progress`, Status → `in_progress`, giữ `qc_failed`, **không** reset round; `STAGE` = `in_progress` ⇒ bỏ bước này. `resume` mà state có `test_sha` = head PR và không còn việc ⇒ đi thẳng §8.
+Ghi start (chỉ `new`/`resume`; `resume` đã có `[AF:DEV] start` ⇒ bỏ): state block `stage: in_progress, branch, next`, comment `[AF:DEV] start` (một dòng: branch), gắn `labels.agent`, assignees = hiện tại ∪ login của bạn (`get_me`), Status → `in_progress` (compare-then-write, expected `STAGE`). `rework`: `STAGE` = `ready` (QC người trả về) ⇒ state `stage: in_progress`, Status → `in_progress`, giữ `qc_failed`, **không** reset round; `STAGE` = `in_progress` ⇒ bỏ bước này. `resume` mà state có `test_sha` = head PR và không còn việc ⇒ đi thẳng §8.
 
 ## 4. Context trước khi code
 
-- `CLAUDE.md` ở root và ở thư mục surface (nếu có) — luật cứng. Project skill trong `.claude/skills/` khớp surface → invoke **trước** khi code (Skill tool).
+- `CLAUDE.md` ở root và thư mục surface của `$WT` — luật cứng. Project skill `$WT/.claude/skills/*/SKILL.md` khớp surface → Read **trước** khi code.
 - **Góp ý trên PR** (mọi MODE): từng mục `pending` + `notes` — đọc cả thread, code quanh `path:line`; xét đúng/hợp lý theo AC, thiết kế, `CLAUDE.md`, pattern repo, hiệu năng, bảo mật. Hợp lý ⇒ sửa, cả chỗ tương tự trong diff. Không ⇒ giữ code, trả lời lý do + bằng chứng. Người vẫn giữ ý sau câu trả lời của bạn ⇒ làm theo, trừ khi phạm AC, MUST, bảo mật ⇒ `needs_info`. Đổi scope/AC ⇒ `needs_info` hỏi PO.
 - `rework`: danh sách **bắt buộc** thêm (a) mục đánh số của verdict `[AF:SA] ❌` mới hơn `[AF:DEV] fixed|pr|reply` gần nhất, (b) comment lỗi của QC người (bản cũ: `[AF:QC] ❌`), (c) góp ý sau `[AF:SYS] escalated` hoặc lỗi block nếu có. Xử lý từng mục. Nhánh BEHIND base ⇒ `git merge origin/<base>` (không rebase commit đã push).
 - Bug (issue hoặc QC người) ⇒ tái hiện trước bằng flow fail trên staging, rồi mới sửa. Không tái hiện được và bằng chứng không đủ ⇒ `needs_info`.
@@ -62,8 +53,8 @@ Ghi start (chỉ `new`/`resume`): state block `stage: in_progress, branch, next`
 ## 6. Commit, push, PR
 
 - Commit theo `git.commit` (Conventional Commits, `{surface}` = key surface; bỏ `({surface})` nếu không thuộc surface nào). Commit nhỏ, đúng một ý.
-- Commit đầu tiên ⇒ push + mở draft PR ngay (checkpoint), sau đó push sau mỗi bước lớn. `git -C "$WT" push -u origin <branch>` — refspec tường minh, không bao giờ force. Bị reject ⇒ `pull --rebase`, push lại.
-- **Chưa có PR** ⇒ `create_pull_request` **`draft=true`**, base=`git.base`, head=branch, title theo `git.commit` (squash merge sẽ dùng title này). Body theo `.github/pull_request_template.md` nếu repo có; luôn có: `<git.link> #<n>`, Thay đổi, Giải pháp (theo thiết kế SA, link comment), Lệch thiết kế (không có thì `—`), checklist AC, bảng AC (AC → file chính → TC → flow), Test tự động (flow → TC, kết quả trên staging), Kiểm chứng lại (`automation.md` §Kiểm chứng lại), `Design: … @ …` nếu có UI, surface đã chạy check.
+- Commit đầu tiên ⇒ push + mở draft PR ngay (checkpoint), sau đó push sau mỗi bước lớn. `git -C "$WT" push origin HEAD:refs/heads/<branch>`, không bao giờ force. Bị reject ⇒ chạy lại `agentflow-base worktree`, push lại.
+- **Chưa có PR** ⇒ `create_pull_request` **`draft=true`**, base=`<base>`, head=branch, title theo `git.commit` (squash merge sẽ dùng title này). Body theo `.github/pull_request_template.md` nếu repo có; luôn có: `<git.link> #<n>`, Thay đổi, Giải pháp (theo thiết kế SA, link comment), Lệch thiết kế (không có thì `—`), checklist AC, bảng AC (AC → file chính → TC → flow), Test tự động (flow → TC, kết quả trên staging), Kiểm chứng lại (`automation.md` §Kiểm chứng lại), `Design: … @ …` nếu có UI, surface đã chạy check.
 - **Đã có PR** ⇒ push; PR chưa draft (người mở) ⇒ `update_pull_request draft=true`. Mọi thread `pending`: `add_reply_to_pull_request_comment` (`commentId` = `reply_to`) `[AF:DEV] fixed @<sha>` + sửa gì, hoặc `[AF:DEV] reply` + lý do giữ / câu trả lời, mention người góp ý; không resolve. Rồi comment PR `[AF:DEV] fixed @<sha>` (không đổi code: `[AF:DEV] reply`) liệt kê từng mục verdict, Request changes, `notes`: sửa gì / giữ vì sao. Mô tả PR lệch code ⇒ `update_pull_request body`.
 
 ## 7. Deploy staging + chạy flow
@@ -71,7 +62,7 @@ Ghi start (chỉ `new`/`resume`): state block `stage: in_progress, branch, next`
 Chạy khi head PR ≠ `test_sha` (thiếu `test_sha` ⇒ chạy). Head = `test_sha` (chỉ trả lời góp ý) ⇒ bỏ qua §7. Cả khối trong **một** lệnh Bash, tên nhánh viết thẳng để hook đọc được:
 
 ```bash
-WT=<repo root>/.claude/worktrees/af-<n>-staging
+WT=<path của §3>-staging
 git fetch -q origin <staging.branch> <branch>
 git worktree remove --force "$WT" 2>/dev/null || true
 git worktree add -q --detach "$WT" origin/<staging.branch>
@@ -86,7 +77,7 @@ git worktree remove --force "$WT"
 - **Workflow staging** — tự làm, không hỏi người, chỉ qua `agentflow-board` (hook chặn lối khác): push thành công ⇒ `agentflow-board cancel <REPO>` (huỷ run cũ đang chạy), rồi `agentflow-board dispatch <REPO> --workflow <file>` cho mỗi mục `staging.workflows` có `when: push`. `when: need` ⇒ dispatch khi cần (vd build app staging khi code mobile đổi), ghi workflow + lý do vào comment `[AF:DEV]` kế tiếp.
 - **Tách lượt**: `MODE` `new`/`rework`, push staging xong và còn flow phải chạy ⇒ state (chỉ sửa) `next: DEV verify trên staging`, `RESULT: in_progress · verify`, dừng — lượt `MODE=verify` làm tiếp. Không có flow ⇒ §8 luôn.
 - **Chờ deploy** khi diff `<test_sha>..origin/<branch>` (thiếu `test_sha`: cả PR) chạm code server/web, kể cả khi merge `Already up to date`; chỉ `e2e_dir` hay mobile ⇒ không chờ:
-  `agentflow-board checks <REPO> --branch <staging.branch> --contains <deploy_sha> --since <deploy_at> --wait 2.5` + `--skip '<glob>'` cho mỗi mục `staging.skip_checks`, Bash `timeout: 170000` (protocol §9); lặp tới khi hết `pending`, giữa các lần build/cài app. `contains: false` ⇒ người reset staging: deploy lại. Chờ quá `staging.timeout_min` trong lượt này ⇒ `[AF:DEV] blocked` pipeline-timeout + sha.
+  `agentflow-board checks <REPO> --branch <staging.branch> --contains <deploy_sha> --since <deploy_at> --wait 2.5` + `--skip '<glob>'` cho mỗi mục `staging.skip_checks`, Bash `timeout: 170000` (protocol §9); lặp tới khi hết `pending`; mobile: build + cài trong lúc chờ (`automation.md` §Chạy). `contains: false` ⇒ người reset staging: deploy lại. Chờ quá `staging.timeout_min` trong lượt này ⇒ `[AF:DEV] blocked` pipeline-timeout + sha.
   `failure` ⇒ log: `actions_list method=list_workflow_runs` theo head → `get_job_logs failed_only=true return_content=true tail_lines=200`. Do diff của ticket ⇒ sửa (tính một vòng); do ticket khác (`git log origin/<base>..origin/<staging.branch> --merges --oneline`) hoặc không xác định ⇒ `[AF:DEV] blocked` + check + đoạn log; do hạ tầng/flaky (runner, mạng, tải deps) ⇒ `agentflow-board rerun <REPO>` rồi chờ lại, không tính vòng (≤ 2 lần mỗi run, quá thì `skipped` ⇒ blocked như trên).
 - **Chạy flow liên quan** trên staging theo `automation.md` §Chạy (mobile: build staging cài lên emulator, trỏ server staging).
 

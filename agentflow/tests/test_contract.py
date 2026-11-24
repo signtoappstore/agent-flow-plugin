@@ -24,18 +24,28 @@ import afconfig  # noqa: E402
 # ask-mode SA design: ~0.3k a spawn for the CLARIFY input, the ambiguity rule and the new heads/state key/RESULT value.
 # 3.7 (platform labels, DEV dispatch/rerun/cancel on staging) adds ~0.5k to a DEV spawn and ~0.2k to SA: one rerun saves a
 # blocked ticket and a human round trip. init/task/board-setup grow by the migration and label steps, read once per repo/ticket.
+# 3.8 (a ticket's worktree comes from origin/<base>, never from the main checkout the person keeps switching) moves the worktree
+# mechanics into bin/agentflow-base: a DEV spawn costs about the same, the protocol grows by the rule DEV and SA follow.
+# 3.8 also adds ~0.25k to a DEV spawn (automation.md): one device per ticket at a time (`run --install`, `queued`) and a rerun
+# when another ticket redeployed staging mid-run. Without them parallel DEVs install over each other's build and turn a
+# sibling's redeploy into a fix round or a `blocked` ticket. init grows by the info/exclude step, read once per repo.
+# engineering.md +0.13k (SA and DEV): the most frequent real review ❌ in the journal (5 of 26, incl. the 4-round #55)
+# is a state change that missed another entry/exit path of the flow.
+# dispatch.md +0.1k: slots fill only when agents run in the background (a foreground spawn holds the orchestrator until it
+# ends). tests/e2e/run.py --scenario multi, 2 runs on 2026-11-24: Claude Code backgrounded 10/11 and 9/9 spawns by itself and
+# #44 was spawned as soon as #43 came back while #42 still ran; the flag keeps it so where the default differs.
 BUDGETS = {
     "agents/sa.md": 10100, "agents/dev.md": 13000,
-    "references/protocol.md": 12700, "references/dispatch.md": 9000, "references/design.md": 2600, "references/automation.md": 6800,
-    "references/engineering.md": 2850, "references/clarify.md": 6650,
-    "skills/init/SKILL.md": 11100, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 2800, "skills/doctor/SKILL.md": 2000,
+    "references/protocol.md": 13000, "references/dispatch.md": 9100, "references/design.md": 2600, "references/automation.md": 7100,
+    "references/engineering.md": 3000, "references/clarify.md": 6650,
+    "skills/init/SKILL.md": 11200, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 2800, "skills/doctor/SKILL.md": 2000,
     "skills/run/SKILL.md": 2400, "skills/status/SKILL.md": 2850, "skills/task/SKILL.md": 9850, "skills/init/references/board-setup.md": 5550,
 }
 # What a spawn reads before it looks at the ticket: its prompt, the protocol and the references it always reads.
 # 2.x DEV paid 9.3k + 12.1k + 8.3k (it read the reviewer prompt to self-review); the shared engineering.md replaced that.
 # 3.0 happy path: SA design + DEV + SA review ≈ 24k + 33.4k + 24k, where the QC plan + verify spawns cost 2 × 27.7k more.
 SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"]}
-PER_SPAWN_LIMIT = {"sa": 25600, "dev": 35300}
+PER_SPAWN_LIMIT = {"sa": 26050, "dev": 35750}
 DESCRIPTION_LIMIT = 700
 
 
@@ -258,6 +268,20 @@ class References(unittest.TestCase):
                         for flag in re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", rest.split("`", 1)[0]):
                             self.assertIn('"%s"' % flag, source)
 
+    def test_base_subcommands_and_flags_exist(self):
+        source = read("bin/agentflow-base")
+        subs = set(re.findall(r'add_parser\("([\w-]+)"', source))
+        for rel in all_docs():
+            for line in read(rel).splitlines():
+                for rest in line.split("agentflow-base ")[1:]:
+                    sub = re.match(r"[a-z]+", rest)
+                    if not sub:
+                        continue
+                    with self.subTest("%s: %s" % (rel, rest[:40])):
+                        self.assertIn(sub.group(0), subs)
+                        for flag in re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", rest.split("`", 1)[0]):
+                            self.assertIn('"%s"' % flag, source)
+
     def test_tool_subcommands_exist(self):
         settings, journal = read("bin/agentflow-settings"), read("bin/agentflow-journal")
         for rel in all_docs():
@@ -394,6 +418,20 @@ class StateMachine(unittest.TestCase):
         ("references/dispatch.md", r"ask mà `plan` thiếu/`options` \| SA `MODE=design`", "ask: ticket đã thiết kế bằng auto vẫn qua cổng xác nhận"),
         ("references/dispatch.md", r"`plan: confirm`.*SYS \*confirmed\* → DEV `MODE=new`", "ask: DEV chỉ bắt đầu sau xác nhận"),
         ("skills/do/SKILL.md", r"trừ cổng ask ở điểm 8", "/do được hỏi ở cổng ask"),
+        # 3.8: a ticket's work starts from origin/<base>; the main checkout is the person's and changes branch at any time
+        ("references/protocol.md", r"\*\*Không dùng checkout chính\*\*.*Không tạo/đổi nhánh local", "agent không đọc code/luật ở nhánh người đang mở"),
+        ("references/protocol.md", r"`git -C <wt> push origin HEAD:refs/heads/<branch>`", "worktree detached push bằng refspec đầy đủ"),
+        ("agents/dev.md", r"`agentflow-base worktree <n> --branch <branch>`", "DEV làm trong worktree từ origin, không nhánh local"),
+        ("agents/dev.md", r"Project skill `\$WT/\.claude/skills/", "luật của repo theo nhánh ticket, không theo checkout chính"),
+        ("references/dispatch.md", r"`agentflow-base clean --issue <n>…`", "dọn worktree không mất commit chưa push"),
+        ("skills/init/SKILL.md", r"git rev-parse --git-common-dir\)/info/exclude", "init không sửa .gitignore của project"),
+        # 3.8: several tickets in Ready — a freed slot is filled at once; parallel DEVs share staging and the device
+        ("skills/run/SKILL.md", r"dừng ⇒ slot trống, lấp ngay, không chờ agent khác xong", "slot trống không chờ cả lô xong"),
+        ("references/dispatch.md", r"run_in_background=<true khi parallel > 1>", "song song thật: spawn thường chặn orchestrator tới khi xong"),
+        ("references/dispatch.md", r"slot trống thì lấp ngay", "song song theo slot, không theo lô"),
+        ("references/automation.md", r"`run --install`.*`queued` = DEV khác đang dùng", "một thiết bị một ticket một lúc"),
+        ("references/automation.md", r"Head staging đổi so với lúc bắt đầu chạy.*không tính vòng", "ticket khác deploy giữa chừng không thành vòng sửa/blocked"),
+        ("references/engineering.md", r"Đổi state/vòng đời của một luồng ⇒ liệt kê mọi lối vào/ra", "tự review bắt lỗi sót lối vào/ra (review ❌ hay gặp nhất)"),
     ]
 
     def test_rules_still_stated(self):

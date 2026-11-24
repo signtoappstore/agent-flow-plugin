@@ -31,15 +31,15 @@ Viết từ AC, user flow, design và rủi ro — không từ code. Mỗi AC:
 
 - **Chọn flow liên quan**: flow của ticket (`tags: [af-<n>]`) + đúng mục **Regression** của `[AF:SA] design`. Diff thật chạm vùng thiết kế không nói ⇒ `agentflow-e2e select --diff origin/<base>...origin/<branch> --issue <n>`, thêm flow cần, ghi PR mục "Lệch thiết kế". Cả suite chỉ khi Regression ghi vậy.
 - Flow mới chạy 1 lần khi viết/sửa; head cuối chạy thêm `--repeat 2` mới tính pass. Flow có sẵn 1 lần. Vòng sửa: chạy lại flow fail + flow liên quan phần vừa sửa.
-- **Web**: `url: ${STAGING_URL}`, value `staging.url`. **Mobile**: build + cài bản trỏ server staging bằng `surfaces.<key>.install` lên emulator/simulator đang chạy (thiếu key ⇒ dò cách build flavor staging một lần theo `CLAUDE.md`/README, journal `slow` đề xuất key) — chỉ khi code của surface (ngoài `e2e_dir`) khác sha ở `/tmp/af-<key>-installed.sha` của lần cài trước; không chờ release mobile. Không có thiết bị, `maestro` hay `staging.url` ⇒ case đó thành QC tay, không phải fail.
-- **Chạy**: `agentflow-e2e run --issue <n> --dir "$WT/<surface path>" --name <key> [--repeat 2] [--maestro="<cờ của surfaces.<key>.e2e>"] [--env-file <file>] <flows>` (trả ngay; web, mobile song song được; lần đầu mỗi lượt thêm `--reset`), rồi `agentflow-e2e wait --issue <n>` theo protocol §9. Chỉ đọc log của flow fail.
+- **Web**: `url: ${STAGING_URL}`, value `staging.url`. **Mobile**: `run --install` build + cài `surfaces.<key>.install` (bản trỏ server staging) khi thiết bị chưa có đúng bản này; lúc chờ deploy chạy `run --install` không flow để build sớm. Thiếu key ⇒ dò cách build flavor staging một lần theo `CLAUDE.md`/README, cài tay, journal `slow` đề xuất key. Thiết bị chỉ chạy một ticket một lúc: `wait` báo `queued` = DEV khác đang dùng, gọi lại; không chờ release mobile. Không có thiết bị, `maestro` hay `staging.url` ⇒ case đó thành QC tay, không phải fail.
+- **Chạy**: ghi head staging (`git ls-remote origin <staging.branch>`), rồi `agentflow-e2e run --issue <n> --dir "$WT/<surface path>" --name <key> [--install] [--repeat 2] [--maestro="<cờ của surfaces.<key>.e2e>"] [--env-file <file>] <flows>` (trả ngay; web, mobile song song được; lần đầu mỗi lượt thêm `--reset`), rồi `agentflow-e2e wait --issue <n>` theo protocol §9. Chỉ đọc log của flow fail.
 
 ## Phân định fail
 
 - Do test (selector, chờ, dữ liệu, thiếu id) ⇒ sửa flow, gắn id. Dò phần tử: `maestro hierarchy` lúc màn đang mở. Không bỏ bước, không làm yếu assert, không thêm `retry`/`optional` để che.
 - Chập chờn ⇒ chạy lại 2 lần, đọc log. Do test ⇒ sửa cách chờ/selector. Do app (race, timeout) ⇒ sửa code.
 - Sai hành vi so với AC ⇒ sửa code (tái hiện trước bằng chính flow đó).
-- Do ticket khác trên staging hoặc hạ tầng ⇒ không sửa code mình, không tính vòng: `[AF:DEV] blocked` + bằng chứng.
+- Head staging đổi so với lúc bắt đầu chạy (ticket khác deploy giữa chừng) ⇒ chờ deploy đó xong, chạy lại flow fail, không tính vòng. Vẫn fail do ticket khác hoặc hạ tầng ⇒ không sửa code mình, không tính vòng: `[AF:DEV] blocked` + bằng chứng.
 - AC mơ hồ, không phán được đúng sai ⇒ `[AF:DEV] ?` + `@<people.po>`, gắn `needs_info`, giữ cột.
 
 ## Ảnh UI/UX

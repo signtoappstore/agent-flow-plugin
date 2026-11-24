@@ -4,9 +4,11 @@ the agent's shell. A subagent's foreground command is moved to the background af
 every poll after that is a turn that re-reads the whole context — so runs are detached and awaited in short steps.
 
   select (--diff RANGE | --paths P...) [--ref REF] [--issue N] [--max N]   flows to re-run + why; one JSON line
-  run --issue N --dir DIR [--name X] [--reset] [--repeat K] [--device UDID] [--maestro=ARGS] [--env-file F]... [-e K=V]... FLOW...
+  run --issue N --dir DIR [--name X] [--reset] [--install] [--repeat K] [--device UDID] [--maestro=ARGS] [--env-file F]... [-e K=V]... FLOW...
                                                                             start detached, return at once; --reset (first run
-                                                                            of a turn) drops the issue's earlier runs
+                                                                            of a turn) drops the issue's earlier runs; --install
+                                                                            builds + installs surfaces.<name>.install first when
+                                                                            the device does not hold this build yet
   wait --issue N [--name X] [--max SEC]     until the runs end or SEC pass (default 160); one JSON line
   wait --log FILE [--max SEC] [--tail N]    until FILE has a line `exit <code>`, for `(cmd > FILE 2>&1; echo "exit $?" >> FILE) &`
 
@@ -16,9 +18,15 @@ quoted in a changed file. A diff that touches no client code (outside each surfa
 web surface. More than `run.max_regression` (default 6) → `over`, for the SA to list as a manual check.
 
 wait exit code: 0 done and green · 1 done with a failure · 2 still running (call again) · 3 nothing to wait for.
+
+A device (emulator, simulator, phone) runs one ticket at a time: parallel DEVs on one device would install over each
+other's build and break each other's flows. A run of a surface that is not web holds a lock on its device (--device, or
+the default one) from install to its last flow; a run that waits for it shows `queued` (the ticket holding it). The lock
+is an flock, so a runner that dies or is stopped frees it.
 """
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -280,6 +288,79 @@ def stop(folder):
             pass
 
 
+def device_lock(cfg, name, device):
+    """Lock key of the device this run uses, or None for a web surface (each run opens its own browser)."""
+    surface = ((cfg or {}).get("surfaces") or {}).get(name) or {}
+    if str(surface.get("platform") or name).lower() == "web" and not device:
+        return None
+    return re.sub(r"[^\w.-]+", "_", device or "default")
+
+
+def acquire(state, folder):
+    """Hold the device for this run; shows `queued` while another ticket's run holds it. → (file, state)."""
+    fh = open(os.path.join(TMP, "af-device-%s.lock" % state["lock"]), "a+")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.seek(0)
+        state["queued"] = fh.read().strip() or "?"
+        save_state(folder, state)
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        state = load_state(folder) or state
+        state.pop("queued", None)
+    fh.seek(0)
+    fh.truncate()
+    fh.write("#%s %s" % (state.get("issue"), state.get("name")))
+    fh.flush()
+    save_state(folder, state)
+    return fh, state
+
+
+def app_build(workdir, e2e_dir):
+    """Last commit of the app code this run builds (the surface without its flows), None when it has uncommitted edits."""
+    spec = ["--", "."] + ([":(exclude)%s" % e2e_dir] if e2e_dir else [])
+    try:
+        dirty = subprocess.run(["git", "status", "--porcelain"] + spec, cwd=workdir, capture_output=True, text=True, timeout=30)
+        head = subprocess.run(["git", "log", "-1", "--format=%H"] + spec, cwd=workdir, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return None if dirty.returncode or dirty.stdout.strip() or head.returncode else head.stdout.strip() or None
+
+
+def install(state, folder):
+    """Build + install the surface's app unless the device already holds this build. → result dict on failure, else None."""
+    record = os.path.join(TMP, "af-device-%s.installed" % state["lock"])
+    build = app_build(state["dir"], state.get("e2e_dir"))
+    want = "%s %s" % (state.get("name"), build) if build else None
+    try:
+        with open(record, encoding="utf-8") as fh:
+            have = fh.read().strip()
+    except OSError:
+        have = None
+    if want and want == have:
+        state["install"] = "skipped"
+        return None
+    if os.path.exists(record):
+        os.remove(record)  # half-installed or another build: unknown until this install ends
+    log_path = os.path.join(folder, "install.log")
+    started = time.time()
+    with open(log_path, "w") as log:
+        code = subprocess.call(["/bin/sh", "-c", state["install_cmd"]], cwd=state["dir"], stdout=log, stderr=subprocess.STDOUT)
+    state["install"] = "ok" if code == 0 else "failed"
+    if code:
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as fh:
+                tail = [ANSI.sub("", l).strip() for l in fh if l.strip()]
+        except OSError:
+            tail = []
+        return {"flow": "install", "rep": 1, "exit": code, "sec": round(time.time() - started),
+                "step": (tail[-1] if tail else "exit %d" % code)[:240], "log": log_path}
+    if want:
+        with open(record, "w", encoding="utf-8") as fh:
+            fh.write(want)
+    return None
+
+
 def read_env_files(paths):
     """KEY=VALUE lines (`export` and quotes allowed). Values go to maestro as `-e`, never to stdout."""
     env = {}
@@ -299,6 +380,8 @@ def read_env_files(paths):
 
 def cmd_run(a):
     workdir = os.path.realpath(a.dir)
+    if not a.flows and not a.install:
+        return emit({"error": "thiếu flow (chỉ build + cài: --install)"}, 3)
     missing = [f for f in a.flows if not os.path.isfile(os.path.join(workdir, f))]
     if missing:
         return emit({"error": "không thấy flow (path tính từ --dir)", "missing": missing}, 3)
@@ -306,6 +389,13 @@ def cmd_run(a):
         if not os.path.isfile(path):
             return emit({"error": "không thấy --env-file %s" % path}, 3)
     name = a.name or os.path.basename(workdir.rstrip("/"))
+    try:
+        cfg = afconfig.load_config(workdir) or {}
+    except ValueError:
+        cfg = {}
+    surface = (cfg.get("surfaces") or {}).get(name) or {}
+    if a.install and not surface.get("install"):
+        return emit({"error": "surfaces.%s.install trống — build + cài tay rồi chạy không --install, journal slow đề xuất key" % name}, 3)
     folder = run_dir(a.issue, name)
     base = os.path.dirname(folder)
     # A new run of the same name replaces the old one. --reset also drops the issue's other runs: results of an earlier
@@ -319,7 +409,9 @@ def cmd_run(a):
     for entry in os.listdir(folder):
         if entry.endswith((".log", ".xml", ".json")):
             os.remove(os.path.join(folder, entry))
-    state = {"name": name, "dir": workdir, "flows": a.flows, "repeat": a.repeat, "total": len(a.flows) * a.repeat,
+    state = {"issue": a.issue, "name": name, "dir": workdir, "flows": a.flows, "repeat": a.repeat, "total": len(a.flows) * a.repeat,
+             "lock": device_lock(cfg, name, a.device), "install_cmd": surface.get("install") if a.install else None,
+             "e2e_dir": str(surface.get("e2e_dir") or ""),
              "device": a.device, "maestro": a.maestro or "", "env_files": [os.path.realpath(p) for p in a.env_file or ()],
              "env_keys": [kv.split("=", 1)[0] for kv in a.env or ()], "results": [], "done": False, "started": time.time()}
     save_state(folder, state)
@@ -364,6 +456,17 @@ def cmd_runner(a):
     except (OSError, ValueError):
         pass
     env_args = [x for k, v in env.items() for x in ("-e", "%s=%s" % (k, v))]
+    held = None
+    if state.get("lock"):
+        held, state = acquire(state, folder)  # released when this process ends, however it ends
+    if state.get("install_cmd"):
+        failed = install(state, folder)
+        if failed:
+            state["results"].append(failed)
+            state["done"], state["ended"] = True, time.time()
+            save_state(folder, state)
+            return 1
+        save_state(folder, state)
     for rep in range(1, state["repeat"] + 1):
         for flow in state["flows"]:
             slug = re.sub(r"[^\w-]+", "_", os.path.splitext(os.path.basename(flow))[0])
@@ -387,13 +490,19 @@ def cmd_runner(a):
             save_state(folder, state)
     state["done"], state["ended"] = True, time.time()
     save_state(folder, state)
+    if held:
+        held.close()
     return 0
 
 
 def summary(state, folder):
     results = state.get("results") or []
     failed = [{k: r[k] for k in ("flow", "rep", "step", "log") if k in r} for r in results if r.get("exit")]
-    out = {"name": state.get("name"), "done": len(results), "total": state.get("total"), "failed": failed}
+    out = {"name": state.get("name"), "done": len([r for r in results if r.get("flow") != "install"]), "total": state.get("total"),
+           "failed": failed}
+    for key in ("queued", "install"):
+        if state.get(key):
+            out[key] = state[key]
     if not state.get("done") and not alive(state.get("pid"), folder):
         out["died"] = True  # runner gone before the end: start the run again
     return out
@@ -448,12 +557,13 @@ def main(argv=None):
     s.add_argument("--dir", required=True, help="thư mục chạy maestro (path của surface trong worktree); flow tính từ đây")
     s.add_argument("--name", help="tên lượt chạy, vd web | mobile (mặc định tên thư mục)")
     s.add_argument("--reset", action="store_true", help="lần run đầu của lượt: bỏ mọi lượt chạy trước của issue")
+    s.add_argument("--install", action="store_true", help="build + cài surfaces.<name>.install trước, khi thiết bị chưa có đúng bản này")
     s.add_argument("--repeat", type=int, default=1, help="số lần chạy mỗi flow")
     s.add_argument("--device", help="udid khi có nhiều thiết bị")
     s.add_argument("--maestro", help="cờ thêm cho `maestro test`, vd --maestro=\"--headless --screen-size 1280x860\"")
     s.add_argument("--env-file", action="append", help="file KEY=VALUE (secret folder của staging.notes) → -e cho maestro")
     s.add_argument("-e", "--env", action="append", help="K=V thêm cho maestro")
-    s.add_argument("flows", nargs="+")
+    s.add_argument("flows", nargs="*", help="không có flow + --install: chỉ build + cài (lúc chờ deploy)")
     s = sub.add_parser("wait", help="chờ lượt chạy (≤ --max giây) rồi in một dòng JSON")
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--issue", type=int)

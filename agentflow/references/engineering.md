@@ -33,4 +33,4 @@ Luật của repo thắng file này: `CLAUDE.md` (root + thư mục bị chạm)
 
 ## Tự review
 
-`git diff origin/<base>...` một lượt theo các mục trên. Mỗi hàm, kiểu, contract bị đổi ⇒ Grep mọi nơi gọi, sửa hết hoặc giữ tương thích. `agentflow-style` sạch.
+`git diff origin/<base>...` một lượt theo các mục trên. Mỗi hàm, kiểu, contract bị đổi ⇒ Grep mọi nơi gọi, sửa hết hoặc giữ tương thích. Đổi state/vòng đời của một luồng ⇒ liệt kê mọi lối vào/ra (mở mới, tiếp tục, màn/tab khác, huỷ, đăng xuất, lỗi), kiểm từng lối. `agentflow-style` sạch.

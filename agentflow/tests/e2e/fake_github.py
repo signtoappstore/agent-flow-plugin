@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Stateful stand-in for the GitHub MCP server (stdio JSON-RPC), for tests/e2e/run.py. State lives in a JSON file, so the
-harness can read what the agents did; every call is logged there. PR heads come from the bare repo, as on GitHub."""
+harness can read what the agents did; every call is logged there with its time. PR heads come from the bare repo, as on
+GitHub. The seeded ticket (#42) lives at the top level of the state; more tickets (scenario multi) in state["more"], each
+{issue, status, status_history, pr}. Calls go to the ticket their issue number, PR number or item id names."""
 
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 
 STATE = os.environ.get("AF_E2E_STATE")
 BARE = os.environ.get("AF_E2E_BARE")
@@ -31,6 +35,29 @@ def head_sha(branch):
     return res.stdout.strip() or None
 
 
+def tickets(st):
+    return [st] + st.get("more", [])
+
+
+def num(value):
+    match = re.search(r"\d+", str(value or ""))
+    return int(match.group(0)) if match else None
+
+
+def ticket(st, issue=None, pr=None, item=None):
+    """The ticket a call names; the seeded one when it names none (single-ticket scenarios)."""
+    for t in tickets(st):
+        if issue is not None and num(issue) == t["issue"]["number"]:
+            return t
+        if pr is not None and t.get("pr") and num(pr) == t["pr"]["number"]:
+            return t
+        if item is not None and str(item) == "PVTI_%d" % t["issue"]["number"]:
+            return t
+    if (issue, pr, item) != (None, None, None) and st.get("more"):
+        raise ValueError("not found")
+    return st
+
+
 def issue_view(st):
     i = st["issue"]
     return {"number": i["number"], "title": i["title"], "state": i["state"], "body": i["body"], "labels": [{"name": n} for n in i["labels"]],
@@ -39,8 +66,22 @@ def issue_view(st):
 
 def item_view(st):
     i = st["issue"]
-    return {"id": "PVTI_42", "content": {"number": i["number"], "title": i["title"], "state": i["state"], "type": "Issue", "repository": "acme/app", "assignees": [{"login": a} for a in i["assignees"]]},
+    return {"id": "PVTI_%d" % i["number"], "content": {"number": i["number"], "title": i["title"], "state": i["state"], "type": "Issue", "repository": "acme/app", "assignees": [{"login": a} for a in i["assignees"]]},
             "fields": [{"name": "Status", "value": {"name": st["status"]}}, {"name": "Labels", "value": i["labels"]}, {"name": "Size", "value": {"name": "S"}}]}
+
+
+def matches(t, query):
+    """The parts of a Projects search query the orchestrator uses: is:open/closed, status:"A","B", label:"x", -label:"x"."""
+    q = query or ""
+    i = t["issue"]
+    if "is:open" in q and i["state"] != "open" or "is:closed" in q and i["state"] != "closed":
+        return False
+    for neg, key, values in re.findall(r'(-?)(status|label):((?:"[^"]*"|[^\s,"]+)(?:,(?:"[^"]*"|[^\s,"]+))*)', q):
+        names = [v.strip('"') for v in re.findall(r'"[^"]*"|[^\s,"]+', values)]
+        have = {t["status"]} if key == "status" else set(i["labels"])
+        if bool(have & set(names)) == bool(neg):
+            return False
+    return True
 
 
 def pr_view(st):
@@ -49,10 +90,28 @@ def pr_view(st):
             "head": {"ref": pr["head"], "sha": head_sha(pr["head"])}, "base": {"ref": pr["base"]}, "html_url": "https://github.com/acme/app/pull/%d" % pr["number"]}
 
 
-def call(name, a, st):
+def call(name, a, root):
     method = a.get("method")
     if name == "get_me":
         return {"login": "agentflow-bot", "id": 1}
+    if name == "projects_list":
+        return {"items": [item_view(t) for t in tickets(root) if matches(t, a.get("query"))], "pageInfo": {"hasNextPage": False, "endCursor": None}}
+    if name == "search_pull_requests":
+        hits = [t for t in tickets(root) if t.get("pr") and any(r.get("state") == "CHANGES_REQUESTED" for r in t["pr"]["reviews"])]
+        return {"total_count": len(hits), "items": [pr_view(t) for t in hits]}
+    if name == "create_pull_request":
+        st = ticket(root, issue=num(re.search(r"/(\d+)-", a.get("head") or "") and re.search(r"/(\d+)-", a.get("head")).group(1)))
+        number = 57 + st["issue"]["number"] - 42
+        st["pr"] = {"number": number, "state": "open", "draft": bool(a.get("draft")), "title": a.get("title", ""), "body": a.get("body", ""), "head": a.get("head"), "base": a.get("base"), "reviews": [], "comments": []}
+        return pr_view(st)
+    if name.startswith(("pull_request", "update_pull_request", "add_reply_to_pull_request")):
+        st = ticket(root, pr=a.get("pullNumber"))
+    elif name == "add_issue_comment" and any(t.get("pr") and num(a.get("issue_number")) == t["pr"]["number"] for t in tickets(root)):
+        st = ticket(root, pr=a.get("issue_number"))
+    elif name in ("projects_get", "projects_write") and a.get("item_id"):
+        st = ticket(root, item=a.get("item_id"))
+    else:
+        st = ticket(root, issue=a.get("issue_number"))
     if name == "issue_read":
         if method == "get_comments":
             return st["issue"]["comments"]
@@ -70,25 +129,20 @@ def call(name, a, st):
         return issue_view(st)
     if name == "add_issue_comment" and st.get("pr") and str(a.get("issue_number")) == str(st["pr"]["number"]):
         st["pr"]["comments"].append({"id": 500 + len(st["pr"]["comments"]), "body": a.get("body", ""), "author_association": "OWNER", "user": {"login": "agentflow-bot"}})
-        return {"id": 500 + len(st["pr"]["comments"]), "html_url": "https://github.com/acme/app/pull/57#issuecomment-%d" % len(st["pr"]["comments"])}
+        return {"id": 500 + len(st["pr"]["comments"]), "html_url": "https://github.com/acme/app/pull/%d#issuecomment-%d" % (st["pr"]["number"], len(st["pr"]["comments"]))}
     if name == "add_issue_comment":
         st["issue"]["comments"].append({"id": len(st["issue"]["comments"]) + 1, "body": a.get("body", ""), "author_association": "OWNER", "user": {"login": "agentflow-bot"}})
-        return {"id": len(st["issue"]["comments"]), "html_url": "https://github.com/acme/app/issues/42#issuecomment-%d" % len(st["issue"]["comments"])}
+        return {"id": len(st["issue"]["comments"]), "html_url": "https://github.com/acme/app/issues/%d#issuecomment-%d" % (st["issue"]["number"], len(st["issue"]["comments"]))}
     if name == "projects_get":
         if method == "get_project":
             return {"id": "PVT_1", "title": "E2E", "number": 3}
         return item_view(st)
-    if name == "projects_list":
-        return {"items": [item_view(st)], "pageInfo": {"hasNextPage": False, "endCursor": None}}
     if name == "projects_write":
         field = a.get("updated_field") or {}
         if method == "update_project_item" and field.get("name") == "Status":
             st["status"] = field.get("value")
             st["status_history"].append(field.get("value"))
         return item_view(st)
-    if name == "create_pull_request":
-        st["pr"] = {"number": 57, "state": "open", "draft": bool(a.get("draft")), "title": a.get("title", ""), "body": a.get("body", ""), "head": a.get("head"), "base": a.get("base"), "reviews": [], "comments": []}
-        return pr_view(st)
     if name in ("pull_request_read", "update_pull_request", "pull_request_review_write", "add_reply_to_pull_request_comment") and not st.get("pr"):
         raise ValueError("pull request not found")
     if name == "pull_request_read":
@@ -112,11 +166,7 @@ def call(name, a, st):
         return pr_view(st)
     if name == "pull_request_review_write":
         st["pr"]["reviews"].append({"id": len(st["pr"]["reviews"]) + 1, "state": str(a.get("event", "COMMENT")) + "ED", "event": a.get("event"), "body": a.get("body", ""), "submitted_at": "2026-10-31T00:00:00Z"})
-        return {"id": len(st["pr"]["reviews"]), "html_url": "https://github.com/acme/app/pull/57#pullrequestreview-%d" % len(st["pr"]["reviews"])}
-    if name == "search_pull_requests":
-        pr = st.get("pr")
-        hit = pr and any(r.get("state") == "CHANGES_REQUESTED" for r in pr["reviews"])
-        return {"total_count": 1 if hit else 0, "items": [pr_view(st)] if hit else []}
+        return {"id": len(st["pr"]["reviews"]), "html_url": "https://github.com/acme/app/pull/%d#pullrequestreview-%d" % (st["pr"]["number"], len(st["pr"]["reviews"]))}
     if name == "add_reply_to_pull_request_comment":
         for thread in st["pr"].get("threads", []):
             if thread["comments"][0]["id"] == int(a.get("commentId") or 0):
@@ -138,8 +188,10 @@ def _gql_comment(c):
             "body": c.get("body", ""), "createdAt": c.get("created_at", "2026-10-31T00:00:00Z")}
 
 
-def graphql(query, st):
+def graphql(query, root, variables=None):
     """The two queries of `agentflow-board feedback`, answered from the same state the MCP side writes."""
+    variables = variables or {}
+    st = ticket(root, issue=variables.get("n"), pr=variables.get("m"))
     pr = st.get("pr")
     node = None
     if pr:
@@ -174,7 +226,7 @@ def main():
         elif msg["method"] == "tools/call":
             name, args = msg["params"]["name"], msg["params"].get("arguments") or {}
             st = load()
-            st["calls"].append({"tool": name, "args": args})
+            st["calls"].append({"tool": name, "args": args, "at": round(time.time(), 1)})
             try:
                 text, error = json.dumps(call(name, args, st), ensure_ascii=False), False
             except (ValueError, AttributeError, KeyError, TypeError) as exc:  # the agent must see it, not a dead connection

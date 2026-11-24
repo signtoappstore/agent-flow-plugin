@@ -634,7 +634,7 @@ RUN_ACTIVE = {"queued", "in_progress", "waiting", "requested", "pending"}
 
 
 def _origin_slug(root):
-    remote = afconfig.git(["remote", "get-url", "origin"], cwd=root) or ""
+    remote = afconfig.git(["config", "--get", "remote.origin.url"], cwd=root) or afconfig.git(["remote", "get-url", "origin"], cwd=root) or ""  # before insteadOf
     return remote.rstrip("/").removesuffix(".git").replace("git@github.com:", "").split("github.com/")[-1]
 
 
@@ -937,8 +937,7 @@ def cmd_preflight(a):
         cfg = afconfig.load_config(root) or {}
     except ValueError:
         cfg = {}
-    base = (cfg.get("git") or {}).get("base") or afconfig.default_branch(root)
-    pushed, why = _push_probe(root, base)
+    pushed, why = _push_probe(root, afconfig.base_branch(cfg))
     local_env = afconfig.settings_env(root)
     out = {"push": pushed, "missing_env": [n for n in _needed_env(cfg) if not local_env.get(n)]}
     if not pushed:
@@ -1066,14 +1065,13 @@ def cmd_doctor(a):
             page += 1
         miss = [x for x in labels if x not in have]
         (fail if miss else ok)("labels%s" % (" thiếu: " + ", ".join(miss) if miss else " đủ"))
-        gitc = cfg.get("git") or {}
-        base = gitc.get("base") or afconfig.default_branch(root)
-        if base and afconfig.git(["ls-remote", "--exit-code", "--heads", "origin", base], cwd=root, timeout=20) is not None:
+        base = afconfig.base_branch(cfg)
+        if afconfig.git(["ls-remote", "--exit-code", "--heads", "origin", base], cwd=root, timeout=20) is not None:
             ok("base branch %s · protected %s" % (base, sorted(afconfig.protected_branches(cfg, root))))
             pushed, why = _push_probe(root, base)
             (ok if pushed else fail)("push lên origin%s" % ("" if pushed else " không được: %s — agent không mở PR, deploy hay commit test được" % why))
         else:
-            fail("base branch %r không có trên origin" % base)
+            fail("base branch %r không có trên origin — việc mới tạo từ origin/<git.base>: khai `git.base` (vd main)" % base)
         stag = afconfig.staging_branch(cfg)
         if not stag:
             fail("staging.branch chưa khai báo — bắt buộc")

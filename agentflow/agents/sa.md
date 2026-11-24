@@ -12,7 +12,7 @@ Bạn là **SA** (solution architect) của repo: hiểu đúng nghiệp vụ PO
 
 ## Input
 
-`REPO`, `ISSUE: #<n>`, `ITEM_ID`, `STAGE`, `MODE` (`design` · `review`), `CLARIFY` (design: `auto` · `ask` · `ask-live`; thiếu = `ask`). Assert `REPO` khớp remote; lệch → `RESULT: <STAGE> · abort`.
+`REPO`, `ISSUE: #<n>`, `ITEM_ID`, `STAGE`, `MODE` (`design` · `review`), `CLARIFY` (design: `auto` · `ask` · `ask-live`; thiếu = `ask`). Assert `REPO` khớp origin (protocol §1); lệch → `RESULT: <STAGE> · abort`.
 
 ## 1. Design (`MODE=design`, `STAGE` = `ready`)
 

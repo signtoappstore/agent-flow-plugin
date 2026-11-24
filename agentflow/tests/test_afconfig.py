@@ -238,15 +238,48 @@ class Repo(unittest.TestCase):
         self.assertEqual(afconfig.load_config(wt), {"schema": 5})  # an agent writes in its worktree: the main copy wins
         self.assertEqual(afconfig.settings_path(wt), os.path.join(self.repo, ".claude", "settings.local.json"))
 
+    def with_origin(self, files):
+        """A bare origin with `files` committed on master, cloned as the main checkout. → (origin, main checkout)."""
+        origin, main = os.path.join(self.repo, "o.git"), os.path.join(self.repo, "main")
+        git(self.repo, "init", "-q", "--bare", "-b", "master", origin)
+        git(self.repo, "clone", "-q", origin, main)
+        for rel, text in files.items():
+            with open(os.path.join(main, rel), "w") as fh:
+                fh.write(text)
+        git(main, "add", "-A")
+        git(main, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c", "--allow-empty")
+        git(main, "push", "-q", "origin", "master")
+        git(main, "remote", "set-head", "origin", "master")
+        return origin, main
+
+    def test_default_branch_without_origin_head(self):
+        _, main = self.with_origin({})
+        git(main, "remote", "set-head", "origin", "--delete")
+        self.assertEqual(afconfig.default_branch(main), "master")
+
     def test_no_config(self):
         self.assertIsNone(afconfig.load_config(self.repo))
         self.assertIsNone(afconfig.main_root(tempfile.gettempdir()))
 
     def test_protected(self):
         cfg = {"git": {"base": "dev", "protected": ["production", "staging"]}, "staging": {"branch": "staging"}}
-        self.assertEqual(afconfig.protected_branches(cfg, self.repo), {"dev", "production"})
-        self.assertEqual(afconfig.protected_branches({"git": {"protected": "prod"}}, self.repo), {"prod", "main", "master"})  # origin/HEAD unset
-        self.assertEqual(afconfig.protected_branches({"git": {"base": "master"}, "staging": {"branch": "master"}}, self.repo), set())
+        self.assertEqual(afconfig.protected_branches(cfg, self.repo), {"dev", "production", "main", "master"})  # no origin: both likely defaults
+        self.assertEqual(afconfig.protected_branches({"git": {"protected": "prod"}}, self.repo), {"prod", "main", "master"})
+        self.assertEqual(afconfig.protected_branches({"git": {"base": "master"}, "staging": {"branch": "master"}}, self.repo), {"main"})
+
+    def test_base_is_git_base_else_master(self):
+        self.assertEqual(afconfig.base_branch({}), "master")
+        self.assertEqual(afconfig.base_branch({"git": {"base": None}}), "master")
+        self.assertEqual(afconfig.base_branch({"git": {"base": "main"}}), "main")
+
+    def test_committed_config_when_the_person_opens_a_branch_without_it(self):
+        _, main = self.with_origin({"agentflow.yaml": "schema: 5\n"})
+        git(main, "switch", "-q", "--orphan", "old")  # a branch from before agentflow.yaml was committed
+        self.assertFalse(os.path.exists(os.path.join(main, "agentflow.yaml")))
+        self.assertEqual(afconfig.load_config(main), {"schema": 5})
+        with open(os.path.join(main, "agentflow.yaml"), "w") as fh:
+            fh.write("schema: 4\n")
+        self.assertEqual(afconfig.load_config(main), {"schema": 4})  # a copy in the main checkout still wins
 
     def test_default_branch_stays_protected_when_base_differs(self):
         bare = os.path.join(self.repo, "o.git")

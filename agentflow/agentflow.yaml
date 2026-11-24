@@ -46,7 +46,7 @@ labels:
 
 # ── GIT ──────────────────────────────────────────────────────────────────────
 git:
-  base: null                   # nhánh PR nhắm tới; null = default branch của repo
+  base: null                   # nhánh gốc: việc mới tạo từ origin/<base> vừa fetch, PR nhắm vào đây; null = master
   protected: []                # nhánh không bao giờ push thẳng (hook chặn), vd [production]. Không ghi nhánh staging
   branch: "{type}/{issue}-{slug}"   # {type} lấy từ bảng types
   commit: "{type}({surface}): {subject}"

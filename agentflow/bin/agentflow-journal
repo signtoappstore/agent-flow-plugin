@@ -38,7 +38,7 @@ def plugin_version():
 
 
 def detect_repo():
-    url = afconfig.git(["remote", "get-url", "origin"]) or ""
+    url = afconfig.git(["config", "--get", "remote.origin.url"]) or afconfig.git(["remote", "get-url", "origin"]) or ""  # before insteadOf
     slug = url.rstrip("/")
     slug = slug[:-4] if slug.endswith(".git") else slug
     slug = slug.split("github.com:")[-1].split("github.com/")[-1]

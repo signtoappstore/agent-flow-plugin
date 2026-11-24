@@ -65,11 +65,11 @@ Model: DEV = `run.models.dev[<Size>]` nếu có, không thì `run.models.dev.def
 ## 5. Spawn
 
 ```
-Agent(subagent_type="agentflow:<sa|dev>", model=<model>,
+Agent(subagent_type="agentflow:<sa|dev>", model=<model>, run_in_background=<true khi parallel > 1>,
       prompt="REPO: <owner/repo>\nISSUE: #<n>\nITEM_ID: <item_id>\nSTAGE: <stage key, vd in_review, sau SYS transition>\nMODE: <mode của bảng §3, hoặc verify theo §6>\nSIZE: <Size, chỉ DEV, nếu có>\nCLARIFY: <auto|ask|ask-live, chỉ SA design>")
 ```
 
-- Song song: tối đa `run.parallel` ticket **khác nhau** trong **một** message. Một ticket không bao giờ có 2 agent cùng lúc. Mỗi ticket một worktree (protocol §8).
+- Song song: tối đa `run.parallel` ticket **khác nhau** cùng chạy, agent chạy nền (spawn thường giữ orchestrator tới khi xong ⇒ thành tuần tự); mỗi thông báo xong ⇒ §6 cho ticket đó, slot trống thì lấp ngay. Một ticket không bao giờ có 2 agent cùng lúc. Mỗi ticket một worktree (protocol §8).
 - Prompt chỉ gồm các dòng trên.
 - Lượt DEV dài (tự chờ pipeline, chạy flow) là bình thường: đừng spawn lại hay gửi tin khi chưa có thông báo xong.
 
@@ -86,7 +86,7 @@ Agent(subagent_type="agentflow:<sa|dev>", model=<model>,
 ## 7. Dừng lượt
 
 - Hết hành động, **hoặc** số ticket xong ≥ giới hạn (`/run`: `run.max_tasks`; `/do`: 1), **hoặc** người nói dừng. Chỉ dừng **giữa** hai spawn.
-- Dọn worktree: `git worktree list` → mỗi `.claude/worktrees/af-<n>` mà issue đã đóng hoặc ticket đã `done`, và `git -C <wt> status --porcelain` rỗng → `git worktree remove <wt>`. `af-<n>-staging` (và `af-<n>-qc` của bản cũ) còn sót khi không có agent đang chạy trên ticket → `git worktree remove --force <wt>`.
+- Dọn worktree: `agentflow-base clean --issue <n>…` cho ticket đã đóng hoặc `done` (`kept` = còn sửa dở/commit chưa push: nêu ở báo cáo), thêm `--staging` khi không còn agent đang chạy.
 
 ## 8. Báo cáo cuối lượt (≤ 15 dòng)
 

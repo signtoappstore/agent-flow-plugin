@@ -252,6 +252,25 @@ def branch_write(sub, args):
     return bool(flags & BRANCH_WRITERS) or (bool(words) and not flags & BRANCH_LISTERS)
 
 
+def local_branch(sub, args, workdir, known):
+    """A command that creates a local branch or attaches a worktree to one. The ticket's worktree is detached: a local
+    branch can be the person's own (`git switch feat/7-x` attaches to it, and commits then move it) or collide with
+    the branch they check out."""
+    flags = {a.split("=", 1)[0] for a in args if a.startswith("-")}
+    words = [a for a in args if not a.startswith("-")]
+    if sub == "worktree":
+        return words[:1] == ["add"] and bool(flags & {"-b", "-B", "--orphan"})
+    if sub == "switch":
+        return not flags & {"-d", "--detach"}
+    if sub != "checkout" or "--" in args or flags & {"-d", "--detach"}:
+        return False
+    if flags & {"-b", "-B", "--orphan", "-t", "--track"}:
+        return True
+    name = words[0] if words else ""
+    return bool(name) and known and any(afconfig.git(["rev-parse", "--verify", "-q", ref + name], cwd=workdir)
+                                        for ref in ("refs/heads/", "refs/remotes/origin/"))  # checkout <name> makes a local branch of origin/<name>
+
+
 def names_staging(arg, staging):
     arg = arg.split("=", 1)[1] if arg.startswith("--source=") else arg
     pattern = r"(refs/heads/|refs/remotes/\w+/|origin/)?%s" % re.escape(staging)
@@ -497,7 +516,10 @@ def check_git(argv, session):
     if session.role == "sa" and (changes or branch_write(sub, args) or sub in ("pull", "checkout", "switch", "worktree", "read-tree")):
         block("SA chỉ đọc git (`fetch`, `diff`, `show`, `grep`, `log`) — không `git %s`." % sub)
     if session.role == "dev" and (sub in ("update-ref", "read-tree") or branch_write(sub, args)):
-        block("DEV không `git %s` — đổi nhánh bằng commit/merge trong worktree; nhánh mới tạo bằng `git worktree add -b`." % sub)
+        block("DEV không `git %s` — đổi nhánh bằng commit/merge trong worktree, không tạo nhánh local." % sub)
+    if session.role == "dev" and local_branch(sub, args, workdir, known):
+        block("DEV không tạo/gắn nhánh local (`git %s`) — worktree ticket detached: `agentflow-base worktree <n> --branch <b>`, "
+              "push `HEAD:refs/heads/<b>`; đọc nhánh khác: `git show origin/<b>:<path>`." % sub)
     if session.role == "dev" and ((changes and sub != "push") or sub in ("switch", "checkout", "pull")):
         if not known or not session.in_dev_worktree(workdir):
             block("DEV chỉ `git %s` trong worktree của mình, ghi path tường minh: `git -C <repo>/.claude/worktrees/af-<n> …`." % sub)
@@ -906,6 +928,14 @@ def check_settings_tool(args, session):
             block("`%s` có thể tắt hook hoặc plugin — người sửa tay nếu thật sự cần." % args[1])
 
 
+def check_base_tool(args, session):
+    sub = next((a for a in args if not a.startswith("-")), "")
+    if sub == "worktree" and session.role == "sa":
+        block("SA chỉ đọc code ở origin/<ref> (`git show`, `git grep`, `git diff`) — không tạo worktree.")
+    if sub == "clean" and session.role:
+        block("worktree của ticket do orchestrator dọn (`agentflow-base clean`).")
+
+
 def check_board_tool(args, session):
     sub = next((a for a in args if not a.startswith("-")), "")
     if sub in ("dispatch", "rerun", "cancel") and session.role == "sa":
@@ -1036,6 +1066,8 @@ def run_argv(argv, cmd, session):
         check_settings_tool(args, session)
     if exe == "agentflow-board":
         check_board_tool(args, session)
+    if exe == "agentflow-base":
+        check_base_tool(args, session)
     if not session.hard_only and exe not in ("git", "gh"):
         check_paths(exe, args, session)
         check_mutators(exe, args, session)

@@ -20,17 +20,15 @@ Bạn là **orchestrator** cho lượt chạy này. Đọc, theo thứ tự:
 
 ```
 boot (dispatch §1)
-lặp:
-  đọc hàng đợi (§2) → bảng hành động (§3) → sắp xếp (§4)
-  bỏ ticket đang in-flight hoặc đã xong trong lượt này
-  rỗng và không còn agent đang chạy → thoát vòng
-  lấy tối đa `parallel` ticket → SYS transition nếu cần → spawn đồng thời (§5)
-  xử lý từng kết quả (§6); ticket còn đi tiếp được thì spawn ngay bước kế, không đọc lại cả board
-  chạm trần (§7) → thoát vòng
+danh sách = đọc hàng đợi (§2) → bảng hành động (§3) → sắp xếp (§4), bỏ ticket in-flight / đã xong trong lượt
+lặp tới khi danh sách rỗng và không còn agent chạy, hoặc chạm trần (§7):
+  còn slot (< `parallel` ticket đang chạy) → ticket kế của danh sách, đọc lại Status của riêng nó, SYS transition nếu cần → spawn (§5)
+  có kết quả (§6): đi tiếp được ⇒ spawn bước kế ngay; dừng ⇒ slot trống, lấp ngay, không chờ agent khác xong
+  danh sách hết mà có slot trống ⇒ đọc lại hàng đợi một lần
 dọn worktree (§7) → báo cáo (§8)
 ```
 
-Đọc lại cả board chỉ khi còn slot trống và các ticket đang chain đã dừng — không poll lại sau mỗi spawn.
+Không poll board sau mỗi spawn: danh sách đã sắp đủ để lấp slot.
 
 ## Chạy liên tục
 

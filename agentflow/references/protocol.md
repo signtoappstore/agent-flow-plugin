@@ -6,7 +6,7 @@ Contract chung cho mọi agent và lệnh `/agentflow:*`.
 
 - **`agentflow.yaml`** ở repo root (commit): hành vi. Gate: `schema` phải là `5`, không thì dừng: "chạy `/agentflow:init`".
 - **`.claude/settings.local.json`** (gitignored): `env` giữ mọi secret. Lệnh cần secret: `agentflow-settings exec -- <cmd>`.
-- Suy từ git mỗi run, không ghi vào config: owner/repo (`git remote get-url origin`), default branch (`git symbolic-ref --short refs/remotes/origin/HEAD`). `git.base: null` ⇒ base = default branch. `staging.branch` chỉ để build test: không bao giờ là base của PR.
+- Suy từ git mỗi run, không ghi vào config: owner/repo (`git config remote.origin.url`: URL trước `insteadOf`, `get-url` đã đổi theo nó). `<base>` = `git.base`, trống ⇒ `master`. `staging.branch` chỉ để build test: không bao giờ là base của PR.
 - `board.url` → `owner`, `owner_type` (`orgs`→`org`, `users`→`user`), `project_number`. Board có thể thuộc owner khác repo.
 - Tên cột: **luôn** dùng `board.status.<stage>`, tên label: **luôn** `labels.<key>`. Không hardcode chuỗi nào.
 
@@ -102,9 +102,10 @@ Agent dùng token của người dùng ⇒ cùng login: **prefix là cách duy n
 
 ## 8. Git
 
-- Nhánh theo `git.branch` (`{type}` = `types[<issue type hoặc label>]`, `{slug}` ASCII thường không dấu 3–5 từ). Commit theo `git.commit`. PR vào `git.base`, luôn mở dạng **draft**; chỉ SA ✅ (không còn mục QC tay) hoặc SYS *qc-manual-pass* mới undraft (`update_pull_request draft=false`). Body có `<git.link> #<n>` + checklist AC.
-- **Mỗi ticket một worktree** `.claude/worktrees/af-<n>` — DEV tạo, xoá khi `done`. `af-<n>-staging`: worktree tạm của DEV, detached tại staging, để deploy — tạo và xoá trong cùng một lệnh. Mọi lệnh chạy trong worktree: `cd <wt> && …` hoặc `git -C <wt> …`; Read/Edit bằng path tuyệt đối trong worktree.
-- Push luôn có refspec tường minh: `git push -u origin <branch>`. Không bao giờ force-push, không push vào `git.protected`/base, không merge PR, không approve (hook chặn cả bốn). Đã có PR mở cho issue ⇒ dùng lại đúng branch/PR đó.
+- Nhánh theo `git.branch` (`{type}` = `types[<issue type hoặc label>]`, `{slug}` ASCII thường không dấu 3–5 từ). Commit theo `git.commit`. PR vào `<base>`, luôn mở dạng **draft**; chỉ SA ✅ (không còn mục QC tay) hoặc SYS *qc-manual-pass* mới undraft (`update_pull_request draft=false`). Body có `<git.link> #<n>` + checklist AC.
+- **Không dùng checkout chính** (của người): code, `CLAUDE.md`, `.claude/skills/` đọc ở `origin/<ref>` (`git show`, `git grep`) hoặc worktree, kể cả khi context đã nạp bản khác. Không tạo/đổi nhánh local.
+- **Mỗi ticket một worktree** detached `.claude/worktrees/af-<n>`: `agentflow-base worktree <n> --branch <branch>` tạo từ `origin/<branch>` (chưa có: `origin/<base>`) hoặc cập nhật; orchestrator xoá khi `done`. `af-<n>-staging`: worktree deploy tạm của DEV, tạo và xoá trong một lệnh. Mọi lệnh chạy trong worktree: `cd <wt> && …` hoặc `git -C <wt> …`; Read/Edit bằng path tuyệt đối trong worktree.
+- Push từ worktree, refspec tường minh: `git -C <wt> push origin HEAD:refs/heads/<branch>`. Không bao giờ force-push, không push vào `git.protected`/base, không merge PR, không approve (hook chặn cả bốn). Đã có PR mở cho issue ⇒ dùng lại đúng branch/PR đó.
 - **Staging**: merge dồn, một chiều nhánh ticket → `staging.branch`, chỉ DEV làm, từ worktree staging, push thường. Không reset, không force-push, không bao giờ merge staging vào nhánh ticket.
 
 ## 9. Tiết kiệm token (bắt buộc)

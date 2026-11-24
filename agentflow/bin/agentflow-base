@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""AgentFlow base tool (stdlib only): a ticket's work starts from the remote base, never from the main checkout.
+
+The main checkout belongs to the person: its branch and its uncommitted edits change at any time, also while an agent runs.
+So a ticket's worktree is checked out *detached*: new work from the freshly fetched origin/<base> (git.base, default
+master), a ticket branch already on origin from origin/<branch>. No local branch, so nothing a `git checkout` in the main
+checkout can collide with, and no local branch of the person's gets moved. Nothing here touches the person's own
+worktrees, branches, index or .gitignore: `.claude/worktrees/` goes to the repo's own info/exclude.
+
+  worktree <n> --branch B [--no-fetch]  create or refresh <root>/.claude/worktrees/af-<n>, detached at origin/B (branch on
+                                        origin) or origin/<base> (new work); one JSON line. Push from it with
+                                        `git -C <path> push origin HEAD:refs/heads/B`
+  clean --issue N [--issue M ...] | --staging
+                                        remove af-<n> worktrees that hold nothing unpushed · remove leftover af-*-staging
+
+worktree keeps what an earlier run left (uncommitted edits, commits not pushed yet), brings origin/B in when someone pushed
+to it (fast-forward, or a merge when the worktree is clean), and refuses (exit 1) to drop work of another branch.
+sync: created · up_to_date · fast_forward · merged · ahead (commits to push) · kept (new work with edits or commits, nothing
+on origin yet) · fresh (new work not started yet, moved to the fresh base) · switched (clean worktree of another branch,
+re-checked out) · behind / diverged (commit, then `git merge origin/B`).
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "scripts"))
+import afconfig  # noqa: E402
+
+ENV = dict(os.environ, GIT_TERMINAL_PROMPT="0")  # never wait on a credential prompt
+ENV.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=15")
+WORKTREES = os.path.join(".claude", "worktrees")
+EXCLUDE = "/.claude/worktrees/"
+BRANCH_FILE = "agentflow-branch"  # in the worktree's private git dir: the branch it works for
+NO_REMOTE_REF = re.compile(r"couldn't find remote ref|no such ref|not our ref", re.I)
+
+
+def emit(obj, code=0):
+    print(json.dumps(obj, ensure_ascii=False))
+    sys.exit(code)
+
+
+def fail(msg, **extra):
+    emit(dict({"error": msg}, **extra), 1)
+
+
+def git(cwd, *args, timeout=60):
+    try:
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout, env=ENV)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, 124, "", "git %s quá %d giây" % (args[0], timeout))
+
+
+def out(cwd, *args):
+    res = git(cwd, *args)
+    return res.stdout.strip() if res.returncode == 0 else None
+
+
+def sha(cwd, ref):
+    return out(cwd, "rev-parse", "--verify", "-q", ref + "^{commit}")
+
+
+def count(cwd, *revs):
+    return int(out(cwd, "rev-list", "--count", *revs) or 0)
+
+
+def last_line(text):
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return re.sub(r"(://)[^/@\s]+@", r"\1", lines[-1] if lines else "")[:240]
+
+
+def fetch(root, branch):
+    """origin/<branch> refreshed by an explicit refspec: a plain `git fetch origin B` leaves origin/B alone in a single-branch
+    clone. → True fetched · False the branch is not on origin. Other errors stop the tool. Parallel agents fetch at once,
+    and a ref lock lost to another fetch is retried."""
+    for _ in range(3):
+        res = git(root, "fetch", "-q", "--no-tags", "origin", "+refs/heads/%s:refs/remotes/origin/%s" % (branch, branch), timeout=120)
+        if res.returncode == 0:
+            return True
+        if NO_REMOTE_REF.search(res.stderr):
+            return False
+        if "lock" not in res.stderr:
+            break
+    fail("git fetch origin %s lỗi: %s" % (branch, last_line(res.stderr)))
+
+
+def root_of():
+    root = afconfig.main_root() or afconfig.repo_root()
+    if not root:
+        fail("không ở trong git repo")
+    return root
+
+
+def resolve(root, do_fetch):
+    """(cfg, base, sha of origin/<base>), origin/<base> fetched first when asked."""
+    try:
+        cfg = afconfig.load_config(root)
+    except ValueError as err:
+        fail("agentflow.yaml không parse được: %s" % err)
+    if cfg is None:
+        fail("không có agentflow.yaml — chạy /agentflow:init")
+    base = afconfig.base_branch(cfg)
+    if do_fetch and not fetch(root, base):
+        fail("origin không có nhánh %s — việc mới tạo từ origin/<git.base>: khai `git.base` trong agentflow.yaml" % base)
+    base_sha = sha(root, "refs/remotes/origin/" + base)
+    if not base_sha:
+        fail("chưa có origin/%s — bỏ --no-fetch" % base)
+    return cfg, base, base_sha
+
+
+def git_path(cwd, flag):
+    """--git-dir / --git-common-dir as an absolute path (git < 2.31 has no --path-format)."""
+    value = out(cwd, "rev-parse", flag)
+    return os.path.realpath(os.path.join(cwd, value)) if value else None
+
+
+def exclude_worktrees(root):
+    """`.claude/worktrees/` ignored by the repo's own exclude file, not by a .gitignore that a branch switch can take away."""
+    common = git_path(root, "--git-common-dir")
+    if not common:
+        return
+    path = os.path.join(common, "info", "exclude")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+    if EXCLUDE.strip("/") in {line.strip().strip("/") for line in text.splitlines()}:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(("" if not text or text.endswith("\n") else "\n") + EXCLUDE + "\n")
+
+
+def registered(root):
+    """Paths of the linked worktrees git knows, resolved."""
+    listing = out(root, "worktree", "list", "--porcelain") or ""
+    return {os.path.realpath(line[9:]) for line in listing.splitlines() if line.startswith("worktree ")}
+
+
+def forget_missing(root, path):
+    """A worktree of ours deleted by hand stays registered and blocks `worktree add`. Drop that one entry only: a
+    repo-wide `git worktree prune` would also drop the person's own worktrees that are just out of reach (unmounted disk)."""
+    if os.path.realpath(path) in registered(root) and not os.path.isdir(path):
+        git(root, "worktree", "remove", "--force", path)
+
+
+def submodules(path):
+    """A new worktree has no submodule checked out; the build needs them."""
+    if not os.path.isfile(os.path.join(path, ".gitmodules")):
+        return None
+    res = git(path, "submodule", "update", "--init", "--recursive", timeout=600)
+    return "ok" if res.returncode == 0 else "lỗi: " + last_line(res.stderr)
+
+
+def branch_file(path):
+    gitdir = git_path(path, "--git-dir")
+    return os.path.join(gitdir, BRANCH_FILE) if gitdir else None
+
+
+def recorded_branch(path):
+    try:
+        with open(branch_file(path) or "", encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return out(path, "symbolic-ref", "--short", "-q", "HEAD")  # made by the DEV of 3.7 and before: on a local branch
+
+
+def unpushed(path):
+    """Commits of HEAD that no origin ref has."""
+    return count(path, "HEAD", "--not", "--remotes=origin")
+
+
+def refresh(path, branch, remote, start):
+    """Bring an existing worktree to `branch` without losing what it holds. → sync value."""
+    old = recorded_branch(path)
+    if out(path, "symbolic-ref", "-q", "HEAD"):  # worktree of the DEV of 3.7 and before, on a local branch: detach, keep HEAD + edits
+        git(path, "checkout", "-q", "--detach")
+    dirty = bool(out(path, "status", "--porcelain"))
+    if old and old != branch:
+        if dirty or unpushed(path):
+            fail("worktree %s còn việc chưa push của nhánh %s — người xử lý trước khi agent làm nhánh %s" % (path, old, branch), path=path)
+        res = git(path, "checkout", "-q", "--detach", start)
+        if res.returncode != 0:
+            fail("không checkout được %s: %s" % (start, last_line(res.stderr)), path=path)
+        return "switched"
+    if not remote:
+        if dirty or unpushed(path):
+            return "kept"
+        if sha(path, "HEAD") == sha(path, start):
+            return "up_to_date"
+        res = git(path, "checkout", "-q", "--detach", start)  # nothing done yet: start from the base as it is now
+        return "fresh" if res.returncode == 0 else "kept"
+    head, target = sha(path, "HEAD"), sha(path, start)
+    if head == target:
+        return "up_to_date"
+    if git(path, "merge-base", "--is-ancestor", head, target).returncode == 0:  # someone pushed to the branch
+        return "fast_forward" if git(path, "checkout", "-q", "--detach", target).returncode == 0 else "behind"
+    if git(path, "merge-base", "--is-ancestor", target, head).returncode == 0:
+        return "ahead"
+    if dirty:
+        return "diverged"
+    if git(path, "merge", "-q", "--no-edit", target).returncode == 0:
+        return "merged"
+    git(path, "merge", "--abort")
+    return "diverged"
+
+
+def cmd_worktree(a):
+    root = root_of()
+    cfg, base, base_sha = resolve(root, not a.no_fetch)
+    branch = a.branch
+    if git(root, "check-ref-format", "--branch", branch).returncode != 0 or branch.startswith("-"):
+        fail("tên nhánh không hợp lệ: %r" % branch)
+    if branch in afconfig.protected_branches(cfg, root) | {base, afconfig.staging_branch(cfg)}:
+        fail("`%s` là nhánh base/protected/staging — ticket làm trên nhánh riêng theo git.branch" % branch)
+    remote = fetch(root, branch) if not a.no_fetch else bool(sha(root, "refs/remotes/origin/" + branch))
+    start = "refs/remotes/origin/" + (branch if remote else base)
+    path = os.path.join(root, WORKTREES, "af-%d" % a.issue)
+    exclude_worktrees(root)
+    forget_missing(root, path)
+    if os.path.realpath(path) in registered(root):
+        sync = refresh(path, branch, remote, start)
+    else:
+        if os.path.isdir(path) and os.listdir(path):
+            fail("%s có sẵn mà không phải worktree — người dọn tay" % path, path=path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        res = git(root, "worktree", "add", "-q", "--detach", path, start)
+        if res.returncode != 0:
+            fail("git worktree add lỗi: %s" % last_line(res.stderr), path=path)
+        sync = "created"
+    with open(branch_file(path), "w", encoding="utf-8") as fh:
+        fh.write(branch + "\n")
+    against = start if remote else "refs/remotes/origin/" + base
+    report = {"path": path, "branch": branch, "base": base, "base_sha": base_sha, "remote": remote, "head": sha(path, "HEAD"),
+              "sync": sync, "dirty": bool(out(path, "status", "--porcelain")), "ahead": count(path, "HEAD", "--not", against),
+              "behind_base": count(path, "refs/remotes/origin/" + base, "--not", "HEAD")}
+    if sync in ("created", "fresh", "switched", "fast_forward", "merged"):
+        state = submodules(path)
+        if state:
+            report["submodules"] = state
+    if sync in ("behind", "diverged"):
+        report["next"] = "commit phần dở rồi `git -C %s merge origin/%s`" % (path, branch)
+    emit(report)
+
+
+def cmd_clean(a):
+    root = root_of()
+    known = registered(root)
+    base = os.path.realpath(os.path.join(root, WORKTREES))
+    removed, kept = [], []
+    targets = [os.path.join(base, "af-%d" % n) for n in a.issue or []]
+    if a.staging:
+        targets += [p for p in sorted(known) if re.fullmatch(r"af-\d+-(staging|qc)", os.path.basename(p)) and os.path.dirname(p) == base]
+    for path in targets:
+        if os.path.realpath(path) not in known:
+            continue
+        staging = re.search(r"-(staging|qc)$", path) is not None
+        if not staging and os.path.isdir(path) and (out(path, "status", "--porcelain") or unpushed(path)):
+            kept.append(path)  # edits or commits nobody pushed: never dropped by a cleanup
+            continue
+        res = git(root, "worktree", "remove", "--force", path)
+        (removed if res.returncode == 0 else kept).append(path)
+    emit({"removed": removed, "kept": kept})
+
+
+def main():
+    p = argparse.ArgumentParser(prog="agentflow-base", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("worktree")
+    s.add_argument("issue", type=int)
+    s.add_argument("--branch", required=True)
+    s.add_argument("--no-fetch", action="store_true", help="dùng origin/* đã fetch, không gọi mạng")
+    s = sub.add_parser("clean")
+    s.add_argument("--issue", type=int, action="append")
+    s.add_argument("--staging", action="store_true", help="dọn worktree staging tạm còn sót (không có agent đang chạy)")
+    a = p.parse_args()
+    if a.cmd == "clean" and not (a.issue or a.staging):
+        p.error("clean cần --issue N hoặc --staging")
+    {"worktree": cmd_worktree, "clean": cmd_clean}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""agentflow-settings, agentflow-journal, agentflow-notify, mcp-headers, result-check: run as the user runs them."""
+"""agentflow-settings, agentflow-journal, agentflow-notify, agentflow-base, mcp-headers, result-check: run as the user runs them."""
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -475,13 +476,16 @@ class E2E(RepoCase):
         self.change("web/.maestro/settings.yaml", "url: x\ntags: [account]\n---\n- tapOn:\n    id: other\n")
         self.assertIn("changed:flow đổi trong diff", self.flows(self.select("--diff", "master...feat"))["web/.maestro/settings.yaml"])
 
-    def run_flows(self, *flows, extra=(), name="web"):
+    def maestro_env(self):
         fake = os.path.join(self.out.name, "bin")
         os.makedirs(fake, exist_ok=True)
         with open(os.path.join(fake, "maestro"), "w") as fh:
             fh.write(FAKE_MAESTRO)
         os.chmod(os.path.join(fake, "maestro"), 0o755)
-        env = dict(self.env, PATH=fake + ":/usr/bin:/bin")
+        return dict(self.env, PATH=fake + ":/usr/bin:/bin")
+
+    def run_flows(self, *flows, extra=(), name="web"):
+        env = self.maestro_env()
         res = tool("agentflow-e2e", "run", "--issue", "42", "--dir", os.path.join(self.repo, "web"), "--name", name, *extra, *flows,
                    cwd=self.repo, env=env)
         return res, env
@@ -535,6 +539,69 @@ class E2E(RepoCase):
         code, out = self.wait(env, "--issue", "42", "--max", "30")
         self.assertEqual((code, [r["name"] for r in out["runs"]]), (0, ["web"]))
 
+    def start(self, issue, surface, *flows, extra=()):
+        env = self.maestro_env()
+        res = tool("agentflow-e2e", "run", "--issue", str(issue), "--dir", os.path.join(self.repo, surface), "--name", surface,
+                   *extra, *flows, cwd=self.repo, env=env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        return env
+
+    def test_one_ticket_at_a_time_on_a_device_web_runs_side_by_side(self):
+        flows = [".maestro/settings.yaml", ".maestro/pay.yaml"] * 3
+        env = self.start(42, "mobile", *flows)
+        self.start(43, "mobile", *flows)
+        code, out = self.wait(env, "--issue", "43", "--name", "mobile", "--max", "0.5")
+        self.assertEqual((code, out["runs"][0].get("queued"), out["runs"][0]["done"]), (2, "#42 mobile", 0))
+        self.assertEqual(self.wait(env, "--issue", "42", "--name", "mobile", "--max", "30")[0], 0)
+        code, out = self.wait(env, "--issue", "43", "--name", "mobile", "--max", "30")
+        self.assertEqual((code, out["runs"][0]["done"], "queued" in out["runs"][0]), (0, 6, False))
+        self.start(44, "web", ".maestro/af-42-tc1-new.yaml", ".maestro/settings.yaml")
+        self.start(45, "web", ".maestro/af-42-tc1-new.yaml", ".maestro/settings.yaml")
+        code, out = self.wait(env, "--issue", "45", "--name", "web", "--max", "0.2")
+        self.assertNotIn("queued", out["runs"][0])
+        for n in ("44", "45"):  # detached runners must end before the temp dir goes
+            self.assertEqual(self.wait(env, "--issue", n, "--max", "30")[0], 0)
+
+    def test_install_only_when_the_device_holds_another_build(self):
+        count = os.path.join(self.out.name, "installs")
+        self.write("agentflow.yaml", E2E_CONFIG.replace('install: "flutter build apk"', 'install: "echo x >> %s"' % count))
+        self.write("mobile/lib/app.dart", "void main() {}\n")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "app")
+        def installs():
+            if not os.path.exists(count):
+                return 0
+            with open(count) as fh:
+                return len(fh.read().split())
+
+        def run(issue):
+            env = self.start(issue, "mobile", ".maestro/settings.yaml", extra=("--install",))
+            code, out = self.wait(env, "--issue", str(issue), "--name", "mobile", "--max", "30")
+            self.assertEqual(code, 0, out)
+            return out["runs"][0]["install"]
+        self.assertEqual((run(42), installs()), ("ok", 1))
+        self.assertEqual((run(42), installs()), ("skipped", 1))
+        self.change("mobile/.maestro/settings.yaml", "appId: x\ntags: [account]\n---\n- tapOn:\n    id: other\n")
+        self.assertEqual((run(43), installs()), ("skipped", 1))  # a flow change needs no new build
+        self.change("mobile/lib/app.dart", "void main() { print(1); }\n")
+        self.assertEqual((run(43), installs()), ("ok", 2))
+        self.write("mobile/lib/app.dart", "void main() { print(2); }\n")  # uncommitted edit: never trust the record
+        self.assertEqual((run(43), installs()), ("ok", 3))
+        self.git("commit", "-q", "-am", "app 2")
+        env = self.start(44, "mobile", extra=("--install",))  # build while the deploy runs, flows after
+        self.assertEqual(self.wait(env, "--issue", "44", "--name", "mobile", "--max", "30")[0], 0)
+        self.assertEqual((run(44), installs()), ("skipped", 4))
+
+    def test_failed_install_is_the_failure_reported(self):
+        self.write("agentflow.yaml", E2E_CONFIG.replace('install: "flutter build apk"', 'install: "echo no emulator >&2; exit 4"'))
+        env = self.start(42, "mobile", ".maestro/settings.yaml", extra=("--install",))
+        code, out = self.wait(env, "--issue", "42", "--name", "mobile", "--max", "30")
+        run = out["runs"][0]
+        self.assertEqual((code, run["install"], run["done"], run["failed"][0]["flow"], run["failed"][0]["step"]), (1, "failed", 0, "install", "no emulator"))
+        res = tool("agentflow-e2e", "run", "--issue", "42", "--dir", os.path.join(self.repo, "web"), "--name", "web", "--install",
+                   ".maestro/settings.yaml", cwd=self.repo, env=env)
+        self.assertEqual(res.returncode, 3)  # web has no install command
+
     def test_wait_log_until_exit_line(self):
         log = os.path.join(self.out.name, "build.log")
         with open(log, "w") as fh:
@@ -546,6 +613,179 @@ class E2E(RepoCase):
         code, out = self.wait(self.env, "--log", log, "--max", "5")
         self.assertEqual((code, out["exit"]), (1, 1))
         self.assertIn("error: x", out["tail"])
+
+
+class Base(unittest.TestCase):
+    """agentflow-base: a ticket's worktree comes from origin, whatever the person does in the main checkout meanwhile."""
+
+    CONFIG = "schema: 5\ngit:\n  base: null\n  protected: [production]\nstaging:\n  branch: staging\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        top = os.path.realpath(self.tmp.name)
+        self.origin, self.main, self.other = (os.path.join(top, n) for n in ("o.git", "main", "other"))
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "master", self.origin], check=True)
+        self.git(top, "clone", "-q", self.origin, self.main)
+        self.write(self.main, "agentflow.yaml", self.CONFIG)
+        self.write(self.main, "a.txt", "a\n")
+        self.commit(self.main, "init")
+        self.git(self.main, "push", "-q", "origin", "master", "master:staging")
+        self.git(self.main, "remote", "set-head", "origin", "master")
+        self.git(top, "clone", "-q", self.origin, self.other)  # someone else pushing to the same branches
+        self.wt = os.path.join(self.main, ".claude", "worktrees", "af-7")
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+    def write(self, cwd, rel, text):
+        with open(os.path.join(cwd, rel), "w") as fh:
+            fh.write(text)
+
+    def commit(self, cwd, msg):
+        self.git(cwd, "add", "-A")
+        self.git(cwd, "commit", "-qm", msg)
+
+    def base(self, *args, code=0):
+        res = tool("agentflow-base", *args, cwd=self.main, env={"GIT_CONFIG_GLOBAL": os.devnull, "GIT_AUTHOR_NAME": "t",
+                   "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+        self.assertEqual(res.returncode, code, res.stdout + res.stderr)
+        return json.loads(res.stdout)
+
+    def push_from_other(self, branch, rel):
+        self.git(self.other, "fetch", "-q", "origin")
+        self.git(self.other, "switch", "-q", "-C", branch, "origin/" + branch)
+        self.write(self.other, rel, rel + "\n")
+        self.commit(self.other, rel)
+        self.git(self.other, "push", "-q", "origin", branch)
+
+    def test_new_work_starts_detached_at_the_fresh_base_without_a_local_branch(self):
+        self.push_from_other("master", "newer.txt")  # the base moved since the main checkout last fetched
+        self.git(self.main, "switch", "-q", "-c", "user/wip")
+        self.write(self.main, "a.txt", "dirty\n")
+        out = self.base("worktree", "7", "--branch", "feat/7-x")
+        self.assertEqual((out["path"], out["sync"], out["remote"], out["ahead"], out["behind_base"]), (self.wt, "created", False, 0, 0))
+        self.assertEqual(out["head"], self.git(self.main, "rev-parse", "origin/master"))
+        self.assertTrue(os.path.isfile(os.path.join(self.wt, "newer.txt")))
+        self.assertEqual(self.git(self.wt, "status", "--porcelain"), "")  # the person's dirty edit stays where it is
+        self.assertEqual(self.git(self.main, "branch", "--list", "feat/7-x"), "")
+        self.assertEqual(subprocess.run(["git", "check-ignore", "-q", ".claude/worktrees/"], cwd=self.main).returncode, 0)
+        self.assertEqual(self.git(self.main, "status", "--porcelain"), "M a.txt")
+        self.write(self.wt, "b.txt", "b\n")
+        self.commit(self.wt, "b")
+        self.git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/feat/7-x")
+        self.assertEqual(self.git(self.main, "ls-remote", "origin", "feat/7-x").split()[0], self.git(self.wt, "rev-parse", "HEAD"))
+
+    def test_the_person_checking_out_the_ticket_branch_does_not_stop_the_agent(self):
+        self.base("worktree", "7", "--branch", "feat/7-x")
+        self.write(self.wt, "b.txt", "b\n")
+        self.commit(self.wt, "b")
+        self.git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/feat/7-x")
+        self.git(self.main, "fetch", "-q", "origin")
+        self.git(self.main, "switch", "-q", "feat/7-x")  # git refuses this when a worktree holds the branch
+        self.push_from_other("feat/7-x", "c.txt")
+        out = self.base("worktree", "7", "--branch", "feat/7-x")
+        self.assertEqual((out["sync"], out["remote"], out["ahead"]), ("fast_forward", True, 0))
+        self.assertTrue(os.path.isfile(os.path.join(self.wt, "c.txt")))
+        self.assertEqual(self.git(self.main, "rev-parse", "--abbrev-ref", "HEAD"), "feat/7-x")
+
+    def test_existing_worktree_keeps_edits_and_unpushed_commits(self):
+        self.base("worktree", "7", "--branch", "feat/7-x")
+        self.write(self.wt, "b.txt", "b\n")
+        self.commit(self.wt, "b")
+        self.git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/feat/7-x")
+        self.write(self.wt, "d.txt", "d\n")
+        self.commit(self.wt, "d")  # a run died before pushing
+        self.write(self.wt, "e.txt", "e\n")  # and before committing
+        out = self.base("worktree", "7", "--branch", "feat/7-x")
+        self.assertEqual((out["sync"], out["dirty"], out["ahead"]), ("ahead", True, 1))
+        self.push_from_other("feat/7-x", "c.txt")
+        out = self.base("worktree", "7", "--branch", "feat/7-x")
+        self.assertEqual(out["sync"], "diverged")
+        self.assertIn("merge origin/feat/7-x", out["next"])
+        self.git(self.wt, "add", "-A")
+        self.git(self.wt, "commit", "-qm", "e")
+        out = self.base("worktree", "7", "--branch", "feat/7-x")
+        self.assertEqual((out["sync"], out["dirty"], out["ahead"]), ("merged", False, 3))
+        self.assertTrue(all(os.path.isfile(os.path.join(self.wt, f)) for f in ("b.txt", "c.txt", "d.txt", "e.txt")))
+
+    def test_new_work_kept_until_pushed_and_base_drift_reported(self):
+        self.base("worktree", "7", "--branch", "feat/7-x")
+        self.write(self.wt, "b.txt", "b\n")
+        self.commit(self.wt, "b")
+        self.push_from_other("master", "newer.txt")
+        out = self.base("worktree", "7", "--branch", "feat/7-x")
+        self.assertEqual((out["sync"], out["remote"], out["ahead"], out["behind_base"]), ("kept", False, 1, 1))
+
+    def test_new_work_not_started_yet_moves_to_the_fresh_base(self):
+        self.base("worktree", "7", "--branch", "feat/7-x")  # an earlier run stopped before its first edit
+        self.push_from_other("master", "newer.txt")
+        out = self.base("worktree", "7", "--branch", "feat/7-x")
+        self.assertEqual((out["sync"], out["head"], out["behind_base"]), ("fresh", self.git(self.main, "rev-parse", "origin/master"), 0))
+
+    def test_base_from_git_base(self):
+        self.git(self.main, "push", "-q", "origin", "master:main")
+        self.write(self.main, "agentflow.yaml", self.CONFIG.replace("base: null", "base: main"))
+        self.push_from_other("main", "on-main.txt")
+        out = self.base("worktree", "7", "--branch", "feat/7-x")
+        self.assertEqual((out["base"], out["head"]), ("main", self.git(self.main, "rev-parse", "origin/main")))
+        self.assertIn("error", self.base("worktree", "8", "--branch", "main", code=1))
+
+    def test_worktree_deleted_by_hand_is_recreated_and_other_worktrees_are_left_alone(self):
+        mine = os.path.join(os.path.dirname(self.main), "mine")
+        self.git(self.main, "worktree", "add", "-q", "--detach", mine, "origin/master")  # the person's own, now out of reach
+        self.base("worktree", "7", "--branch", "feat/7-x")
+        shutil.rmtree(self.wt)
+        shutil.rmtree(mine)
+        self.assertEqual(self.base("worktree", "7", "--branch", "feat/7-x")["sync"], "created")
+        self.assertIn(mine, self.git(self.main, "worktree", "list", "--porcelain"))  # never pruned by agentflow
+        shutil.rmtree(self.wt)
+        self.assertEqual(self.base("clean", "--issue", "7"), {"removed": [self.wt], "kept": []})
+        self.assertIn(mine, self.git(self.main, "worktree", "list", "--porcelain"))
+
+    def test_other_branch_only_over_a_worktree_that_holds_nothing_unpushed(self):
+        self.base("worktree", "7", "--branch", "feat/7-x")
+        self.write(self.wt, "b.txt", "b\n")
+        self.commit(self.wt, "b")
+        self.assertIn("feat/7-x", self.base("worktree", "7", "--branch", "fix/7-y", code=1)["error"])
+        self.git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/feat/7-x")
+        out = self.base("worktree", "7", "--branch", "fix/7-y")
+        self.assertEqual((out["sync"], out["head"]), ("switched", self.git(self.main, "rev-parse", "origin/master")))
+
+    def test_worktree_of_the_old_dev_on_a_local_branch_is_detached_in_place(self):
+        self.git(self.main, "worktree", "add", "-q", self.wt, "-b", "feat/7-x", "origin/master")
+        self.write(self.wt, "b.txt", "b\n")
+        self.commit(self.wt, "b")
+        local = self.git(self.main, "rev-parse", "feat/7-x")
+        out = self.base("worktree", "7", "--branch", "feat/7-x")
+        self.assertEqual((out["sync"], out["head"], out["ahead"]), ("kept", local, 1))
+        self.assertEqual(self.git(self.wt, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD")
+        self.git(self.main, "switch", "-q", "feat/7-x")  # free for the person now
+        self.assertEqual(self.git(self.main, "rev-parse", "feat/7-x"), local)
+
+    def test_refuses_base_protected_staging_and_bad_names(self):
+        for branch in ("master", "production", "staging", "-x", "a..b"):
+            with self.subTest(branch):
+                self.assertIn("error", self.base("worktree", "7", "--branch=" + branch, code=1))
+        self.assertFalse(os.path.exists(self.wt))
+
+    def test_single_branch_clone_still_sees_the_ticket_branch(self):
+        self.push_from_other("master", "x.txt")
+        self.git(self.other, "push", "-q", "origin", "master:feat/7-x")
+        self.git(self.main, "config", "remote.origin.fetch", "+refs/heads/master:refs/remotes/origin/master")
+        out = self.base("worktree", "7", "--branch", "feat/7-x")
+        self.assertEqual((out["remote"], out["head"]), (True, self.git(self.main, "rev-parse", "refs/remotes/origin/feat/7-x")))
+
+    def test_clean_never_drops_unpushed_work(self):
+        self.base("worktree", "7", "--branch", "feat/7-x")
+        self.write(self.wt, "b.txt", "b\n")
+        self.commit(self.wt, "b")
+        staging = self.wt + "-staging"
+        self.git(self.main, "worktree", "add", "-q", "--detach", staging, "origin/staging")
+        self.write(staging, "s.txt", "s\n")
+        self.assertEqual(self.base("clean", "--issue", "7", "--staging"), {"removed": [staging], "kept": [self.wt]})
+        self.git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/feat/7-x")
+        self.assertEqual(self.base("clean", "--issue", "7", "--issue", "8"), {"removed": [self.wt], "kept": []})
 
 
 class ResultCheck(unittest.TestCase):

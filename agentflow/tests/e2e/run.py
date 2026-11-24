@@ -2,7 +2,7 @@
 """End-to-end run of one ticket: `claude -p "/agentflow:do #42"` with real git, real hooks and real subagents, against a local
 bare origin and a stateful fake GitHub. Asserts on what ended up in GitHub and in git, not on what the agents said.
 
-  python3 agentflow/tests/e2e/run.py [--scenario new|rework|feedback|requeue|manual-pass|manual-qc|pipeline-fail|pipeline-infra|pipeline-timeout] [--budget USD] [--model sonnet] [--keep]
+  python3 agentflow/tests/e2e/run.py [--scenario new|rework|feedback|requeue|manual-pass|manual-qc|pipeline-fail|pipeline-infra|pipeline-timeout|multi] [--budget USD] [--model sonnet] [--keep]
 
 new: a fresh ticket in Ready: SA designs, DEV codes + writes the e2e test, deploys to staging, runs it, SA reviews. rework: a human QC
 returned the ticket with a real bug on the PR branch, which is also on staging. feedback: at Ready to Merge a human requested
@@ -10,6 +10,11 @@ changes, and left an inline comment that would break div. requeue: a ticket of t
 staging that a human has since reset. manual-pass: a human QC ticked the checklist and dragged the card. manual-qc: the PR asks
 for a test on a real device, so SA hands the ticket to the human QC. pipeline-fail: DEV resumes a ticket whose staging build
 fails because of this PR. pipeline-infra: it fails because of the infrastructure. pipeline-timeout: it never reports.
+multi: `/agentflow:run` with three fresh tickets in Ready and `run.parallel: 2`; each must reach Ready to Merge, and the third
+must start while one of the first two still runs (a freed slot is filled, no waiting for the whole batch).
+
+Every scenario runs while the person works on something else in the main checkout: own branch, an uncommitted edit
+(person_at_work). The ticket's worktree comes from origin, so all of that must stay as it was.
 
 Costs tokens, so unittest discovery does not pick it up. Nothing leaves the machine: GitHub MCP is replaced, the board tool
 points at a local server, and GITHUB_TOKEN / GH_TOKEN are fake so a stray `gh` call fails.
@@ -51,8 +56,9 @@ surfaces:
 forbidden: []
 design: {figma: false, repo: []}
 staging: {branch: staging, url: "", build: "", notes: "", timeout_min: %(timeout)d, skip_checks: ["distribute-*"]}
+clarify: {task: auto, implement: auto}  # no one answers a question under claude -p
 people: {po: [acme-po], qc: [acme-qc], reviewers: [acme-rev]}
-run: {parallel: 1, max_tasks: 1, max_review_rounds: 3, max_qc_rounds: 2, max_test_rounds: 3, models: {dev: {default: %(model)s}, sa: %(model)s}}
+run: {parallel: %(parallel)d, max_tasks: %(tasks)d, max_review_rounds: 3, max_qc_rounds: 2, max_test_rounds: 3, models: {dev: {default: %(model)s}, sa: %(model)s}}
 notify: {telegram: false, events: [blocked]}
 """
 ISSUE_BODY = """### Vấn đề và mục tiêu
@@ -71,7 +77,7 @@ def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
-def make_repo(base, model, timeout=30):
+def make_repo(base, model, timeout=30, parallel=1, tasks=1):
     bare = os.path.join(base, "origin.git")
     repo = os.path.join(base, "app")
     git(base, "init", "-q", "--bare", "-b", "master", bare)
@@ -84,7 +90,7 @@ def make_repo(base, model, timeout=30):
     with open(os.path.join(repo, ".gitignore"), "w") as fh:
         fh.write(".claude/settings.local.json\n.claude/worktrees/\n__pycache__/\n")
     with open(os.path.join(repo, "agentflow.yaml"), "w") as fh:
-        fh.write(AGENTFLOW_YAML % {"model": model, "timeout": timeout})
+        fh.write(AGENTFLOW_YAML % {"model": model, "timeout": timeout, "parallel": parallel, "tasks": tasks})
     with open(os.path.join(repo, "calc.py"), "w") as fh:
         fh.write("def add(a, b):\n    return a + b\n")
     with open(os.path.join(repo, "test_calc.py"), "w") as fh:
@@ -100,6 +106,17 @@ def make_repo(base, model, timeout=30):
     git(repo, "fetch", "-q", "origin")
     git(repo, "remote", "set-head", "origin", "master")
     return repo, bare
+
+
+PERSON_BRANCH = "user/wip"
+PERSON_EDIT = "def add(a, b):\n    return a + b  # việc dở của người, chưa commit\n"
+
+
+def person_at_work(repo):
+    """The person's own branch in the main checkout, with an uncommitted edit."""
+    git(repo, "switch", "-q", "-c", PERSON_BRANCH)
+    with open(os.path.join(repo, "calc.py"), "w") as fh:
+        fh.write(PERSON_EDIT)
 
 
 def bot(i, body):
@@ -148,7 +165,18 @@ def state_block(stage, **keys):
     return "\n<!-- agentflow:state\n%s\nnext: x\n-->" % "\n".join(lines)
 
 
+MORE = [(43, "Thêm hàm đảo chuỗi vào text.py", "- [ ] Khi gọi `reverse(\"abc\")` từ text.py thì trả về `\"cba\"`\n- [ ] Khi gọi `reverse(\"\")` thì trả về chuỗi rỗng"),
+        (44, "Thêm hàm lớn nhất vào stats.py", "- [ ] Khi gọi `largest([3, 9, 2])` từ stats.py thì trả về 9\n- [ ] Khi gọi `largest([])` thì báo lỗi `ValueError`")]
+
+
 def seed_scenario(scenario, repo, state):
+    if scenario == "multi":  # two more fresh tickets in Ready, each in a file of its own
+        state["more"] = [{"status": "Ready", "status_history": [], "pr": None,
+                          "issue": {"number": n, "title": title, "state": "open", "labels": ["Feature"], "assignees": [], "comments": [],
+                                    "body": ISSUE_BODY.replace("calc.py cần thêm phép chia.", title + ".").split("### Tiêu chí")[0]
+                                    + "### Tiêu chí nghiệm thu\n" + ac + "\n\n### Hướng dẫn cho QC\nTest tự động được hết bằng e2e của surface `core`.\n"}}
+                         for n, title, ac in MORE]
+        return
     if scenario == "new":
         return
     good = scenario not in ("rework", "pipeline-fail")
@@ -263,11 +291,11 @@ def serve_checks(bare, scenario, seeded_head, state_path):
             self.wfile.write(payload)
 
         def do_POST(self):
-            query = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}").get("query", "")
+            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
             with open(state_path, encoding="utf-8") as fh:
                 state = json.load(fh)
             try:
-                body = {"data": fake_github.graphql(query, state)}
+                body = {"data": fake_github.graphql(payload.get("query", ""), state, payload.get("variables"))}
             except ValueError as exc:
                 body = {"errors": [{"message": str(exc)}]}
             payload = json.dumps(body).encode()
@@ -281,7 +309,87 @@ def serve_checks(bare, scenario, seeded_head, state_path):
     return server
 
 
-def assertions(state, repo, bare, master_before, scenario="new"):
+WRITES = ("issue_write", "add_issue_comment", "projects_write", "create_pull_request", "update_pull_request", "pull_request_review_write")
+
+
+def ticket_times(state):
+    """Issue number → (first call that names it, read or write: an agent starts by reading its ticket · last write)."""
+    pr_issue = {t["pr"]["number"]: t["issue"]["number"] for t in fake_github.tickets(state) if t.get("pr")}
+    out = {}
+    for c in state["calls"]:
+        a = c["args"]
+        if not (a.get("issue_number") or a.get("pullNumber") or a.get("item_id") or c["tool"] == "create_pull_request"):
+            continue
+        n = fake_github.num(a.get("issue_number") or a.get("pullNumber") or str(a.get("item_id") or "").replace("PVTI_", "")
+                            or (re.search(r"/(\d+)-", a.get("head") or "") or [None, None])[1])
+        n = pr_issue.get(n, n)
+        if n and "at" in c:
+            first, last = out.get(n, (c["at"], None))
+            out[n] = (min(first, c["at"]), max(last or 0, c["at"]) if c["tool"] in WRITES else last)
+    return {n: (a, b or a) for n, (a, b) in out.items()}
+
+
+def spawn_order(log):
+    """Orchestrator events in order: ("spawn", issue) and ("done", issue). An agent is done when its result comes back
+    (foreground) or its task notification does (background)."""
+    events, issue_of, task_of = [], {}, {}
+    with open(log, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if d.get("parent_tool_use_id"):
+                continue
+            kind, sub = d.get("type"), d.get("subtype")
+            if kind == "assistant":
+                for b in d["message"].get("content") or []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use" and b["name"] in ("Agent", "Task"):
+                        n = re.search(r"ISSUE: #(\d+)", b["input"].get("prompt", ""))
+                        issue_of[b["id"]] = int(n.group(1)) if n else None
+                        events.append(("spawn", issue_of[b["id"]]))
+            elif kind == "user":
+                for b in (d.get("message") or {}).get("content") or []:
+                    if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") in issue_of \
+                            and "Async agent launched" not in json.dumps(b.get("content")):
+                        events.append(("done", issue_of[b["tool_use_id"]]))
+            elif kind == "system" and sub == "task_started" and d.get("is_backgrounded"):
+                task_of[d.get("task_id")] = issue_of.get(d.get("tool_use_id"))
+            elif kind == "system" and sub == "task_notification" and d.get("task_id") in task_of:
+                events.append(("done", task_of[d["task_id"]]))
+    return events
+
+
+def slot_filled(log, third=44, first=(42, 43)):
+    """The third ticket was spawned before every agent of the first two had come back: a freed slot was filled at once."""
+    events = spawn_order(log)
+    start = next((i for i, e in enumerate(events) if e == ("spawn", third)), None)
+    last_done = max((i for i, e in enumerate(events) if e[0] == "done" and e[1] in first), default=None)
+    return start is not None and last_done is not None and start < last_done, " ".join("%s%s" % ("S" if k == "spawn" else "d", n) for k, n in events)
+
+
+def multi_assertions(state, repo, bare, master_before, log=None):
+    checks = []
+    for t in fake_github.tickets(state):
+        n, pr = t["issue"]["number"], t.get("pr") or {}
+        head = git(bare, "rev-parse", "--verify", "-q", "refs/heads/" + pr["head"]) if pr.get("head") else None
+        on_staging = bool(head) and subprocess.run(["git", "merge-base", "--is-ancestor", head, "staging"], cwd=bare).returncode == 0
+        checks += [("#%d tới Ready to Merge" % n, t["status"] == "Ready to Merge", t["status"]),
+                   ("#%d PR nhắm master, đã lên staging" % n, pr.get("base") == "master" and on_staging, (pr.get("base"), head)),
+                   ("#%d label sạch" % n, set(t["issue"]["labels"]) - {"Feature"} == {"agentflow"}, t["issue"]["labels"])]
+    filled, where = slot_filled(log) if log else (False, "không có log")
+    checks += [("#44 được spawn khi agent của #42/#43 còn chạy (lấp slot, không chờ cả lô)", filled, where),
+               ("không merge, không APPROVE", not any(c["tool"] == "merge_pull_request" or str(c["args"].get("event")).upper() == "APPROVE" for c in state["calls"]), ""),
+               ("master không bị đụng", git(bare, "rev-parse", "master") == master_before, "master"),
+               ("checkout chính của người y nguyên", git(repo, "rev-parse", "--abbrev-ref", "HEAD") == PERSON_BRANCH
+                and git(repo, "status", "--porcelain") == "M calc.py", git(repo, "status", "--porcelain")),
+               ("agent không tạo nhánh local", git(repo, "branch", "--list", "feat/*", "fix/*") == "", git(repo, "branch", "--list"))]
+    return checks
+
+
+def assertions(state, repo, bare, master_before, scenario="new", log=None, status_before=None):
+    if scenario == "multi":
+        return multi_assertions(state, repo, bare, master_before, log)
     heads = [c["body"].lstrip().split("\n", 1)[0] for c in state["issue"]["comments"]]
     tools = [c["tool"] for c in state["calls"]]
     pr = state.get("pr") or {}
@@ -339,7 +447,8 @@ def assertions(state, repo, bare, master_before, scenario="new"):
                  ("review lại sau khi sửa", sum(h.startswith("[AF:SA] ✅") for h in heads) >= 2, heads),
                  ("QC người test lại", "qc-manual" in labels and "qc-failed" not in labels, labels),
                  ("PR còn draft", pr.get("draft") is True, pr.get("draft"))]
-    flow = [s for s in state["status_history"] if s in ("In Progress", "In Review", "In QC", "Ready to Merge")][-3:]
+    columns = [s for s in [status_before] + state["status_history"] if s in ("In Progress", "In Review", "In QC", "Ready to Merge")]
+    flow = [s for i, s in enumerate(columns) if i == 0 or s != columns[i - 1]][-3:]  # a seeded column counts; a rewrite of it is no move
     return extra + safe + [
         ("Status tới %s" % final, state["status"] == final, state["status"]),
         ("đi đúng thứ tự cột", flow == ["In Progress", "In Review", final], state["status_history"]),
@@ -349,25 +458,32 @@ def assertions(state, repo, bare, master_before, scenario="new"):
         ("không có QC agent, SA không deploy", not has("[AF:QC]") and not any(h.startswith("[AF:SA] deployed") for h in heads[len(heads) - 3:]), heads),
         ("state có test_sha", "test_sha:" in state["issue"]["body"], ""),
         ("label sạch", set(labels) - {"Feature", "qc-manual"} == {"agentflow"}, labels),
-        ("checkout chính sạch", git(repo, "status", "--porcelain") == "", git(repo, "status", "--porcelain")),
+        ("checkout chính của người y nguyên", git(repo, "rev-parse", "--abbrev-ref", "HEAD") == PERSON_BRANCH
+         and git(repo, "status", "--porcelain") == "M calc.py" and open(os.path.join(repo, "calc.py")).read() == PERSON_EDIT,
+         (git(repo, "rev-parse", "--abbrev-ref", "HEAD"), git(repo, "status", "--porcelain"))),
+        ("agent không tạo nhánh local", git(repo, "branch", "--list", "feat/*", "fix/*") == "", git(repo, "branch", "--list")),
     ]
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--scenario", choices=["new", "rework", "feedback", "requeue", "manual-pass", "manual-qc", "pipeline-fail", "pipeline-infra", "pipeline-timeout"], default="new")
+    p.add_argument("--scenario", choices=["new", "rework", "feedback", "requeue", "manual-pass", "manual-qc", "pipeline-fail", "pipeline-infra", "pipeline-timeout", "multi"], default="new")
     p.add_argument("--budget", default="8")
     p.add_argument("--model", default="sonnet")
     p.add_argument("--timeout", type=int, default=1500)
     p.add_argument("--keep", action="store_true")
+    p.add_argument("--parallel", type=int, help="run.parallel (multi: 2, others: 1)")
     a = p.parse_args()
     base = os.path.realpath(tempfile.mkdtemp(prefix="af-e2e-"))
     state_path = os.path.join(base, "github.json")
-    repo, bare = make_repo(base, a.model, 2 if a.scenario == "pipeline-timeout" else 30)  # DEV counts the timeout from when it starts waiting
+    multi = a.scenario == "multi"
+    repo, bare = make_repo(base, a.model, 2 if a.scenario == "pipeline-timeout" else 30, a.parallel or (2 if multi else 1), 3 if multi else 1)  # DEV counts the timeout from when it starts waiting
     master_before = git(bare, "rev-parse", "master")
     state = {"status": "Ready", "status_history": [], "calls": [], "pr": None,
              "issue": {"number": 42, "title": "Thêm hàm chia vào calc.py", "state": "open", "body": ISSUE_BODY, "labels": ["Feature"], "assignees": [], "comments": []}}
     seed_scenario(a.scenario, repo, state)
+    status_before = state["status"]
+    person_at_work(repo)
     with open(state_path, "w", encoding="utf-8") as fh:
         json.dump(state, fh, ensure_ascii=False)
     plugin = make_plugin(base, state_path, bare)
@@ -377,14 +493,14 @@ def main():
     log = os.path.join(base, "claude.jsonl")
     with open(log, "w") as out:
         try:
-            res = subprocess.run(["claude", "-p", "/agentflow:do #42", "--plugin-dir", plugin, "--model", a.model, "--max-budget-usd", a.budget, "--dangerously-skip-permissions",
+            res = subprocess.run(["claude", "-p", "/agentflow:run" if a.scenario == "multi" else "/agentflow:do #42", "--plugin-dir", plugin, "--model", a.model, "--max-budget-usd", a.budget, "--dangerously-skip-permissions",
                                   "--output-format", "stream-json", "--verbose"], cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, timeout=a.timeout)
             exit_code = res.returncode
         except subprocess.TimeoutExpired:
             exit_code = "timeout"
     with open(state_path, encoding="utf-8") as fh:
         state = json.load(fh)
-    checks = assertions(state, repo, bare, master_before, a.scenario)
+    checks = assertions(state, repo, bare, master_before, a.scenario, log, status_before)
     cost = None
     with open(log) as fh:
         for line in fh:
@@ -399,6 +515,11 @@ def main():
         failed += not ok
         print("%s %s%s" % ("✓" if ok else "✗", name, "" if ok else "  → %s" % (detail,)))
     print("claude exit %s · $%s · %d lời gọi MCP · comment: %s" % (exit_code, cost, len(state["calls"]), [c["body"].lstrip().split("\n", 1)[0][:40] for c in state["issue"]["comments"]]))
+    times = ticket_times(state)
+    if times:
+        t0 = min(x[0] for x in times.values())
+        print("thời gian (giây từ lúc bắt đầu): %s · tổng %d giây" % ({n: (round(a - t0), round(b - t0)) for n, (a, b) in sorted(times.items())},
+                                                                        round(max(x[1] for x in times.values()) - t0)))
     print("kết quả: %s" % ("ĐẠT" if not failed else "%d/%d không đạt" % (failed, len(checks))))
     if a.keep or failed:
         print("giữ lại: %s" % base)

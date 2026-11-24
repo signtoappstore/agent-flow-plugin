@@ -12,6 +12,7 @@ import subprocess
 
 CONFIG_NAME = "agentflow.yaml"
 SCHEMA = 5
+DEFAULT_BASE = "master"  # git.base unset: new work starts from origin/master and PRs target master
 
 DEFAULT_FORBIDDEN = [".claude/settings.local.json", "**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.jks", "**/*.keystore",
                      "**/.netrc", "**/.git-credentials", "**/id_rsa", "**/id_ed25519"]
@@ -212,19 +213,36 @@ def main_root(cwd=None):
 
 
 def default_branch(cwd=None):
+    """origin's default branch: origin/HEAD, or (a clone that never set it) the one of master/main origin has."""
     ref = git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=cwd)
-    return ref.split("/", 1)[1] if ref and "/" in ref else None
+    if ref and "/" in ref:
+        return ref.split("/", 1)[1]
+    for name in (DEFAULT_BASE, "main"):
+        if git(["rev-parse", "--verify", "-q", "refs/remotes/origin/" + name], cwd=cwd):
+            return name
+    return None
+
+
+def committed_config(cwd):
+    """agentflow.yaml as committed on origin: the person may have checked out a branch that predates it."""
+    for ref in ("refs/remotes/origin/HEAD", "refs/remotes/origin/" + DEFAULT_BASE):
+        text = git(["show", "%s:%s" % (ref, CONFIG_NAME)], cwd=cwd)
+        if text:
+            return text
+    return None
 
 
 def load_config(root):
     """agentflow.yaml of the repo. The main checkout's copy wins over a worktree's: an agent may write in its worktree,
-    and what it writes there must not change what the guard enforces."""
+    and what it writes there must not change what the guard enforces. The person's branch in the main checkout may have
+    no copy (opened before the file was committed): the committed copy on origin then keeps agents and guard on."""
     main = main_root(root)
     for path in ([os.path.join(main, CONFIG_NAME)] if main else []) + [os.path.join(root, CONFIG_NAME)]:
         if os.path.isfile(path):
             with open(path, encoding="utf-8") as fh:
                 return parse_yaml(fh.read()) or {}
-    return None
+    text = committed_config(main or root)
+    return (parse_yaml(text) or {}) if text else None
 
 
 def settings_path(cwd=None):
@@ -387,8 +405,8 @@ def validate_config(cfg):
     staging = staging_branch(cfg)
     if not staging:
         fail("staging.branch chưa khai báo — bắt buộc")
-    elif staging == gitc.get("base"):
-        fail("staging.branch = %r trùng git.base — PR phải nhắm nhánh khác" % staging)
+    elif staging == base_branch(cfg):
+        fail("staging.branch = %r trùng git.base (mặc định %s) — staging chỉ để build test, PR nhắm nhánh gốc" % (staging, DEFAULT_BASE))
     if staging and staging in as_list(gitc.get("protected")):
         warn("git.protected có nhánh staging `%s` — bị bỏ qua, DEV phải push được vào đó" % staging)
     for key, surface in (cfg.get("surfaces") or {}).items():
@@ -446,23 +464,23 @@ def _test_folder(e2e_dir, base=""):
     return _safe_relative(e2e_dir) and os.path.normpath(e2e_dir) != "." and not NOT_TEST_FOLDERS & set(folder.split("/"))
 
 
-def base_branch(cfg, root):
-    return str(((cfg or {}).get("git") or {}).get("base") or "") or default_branch(root)
-
-
 def staging_branch(cfg):
     return str(((cfg or {}).get("staging") or {}).get("branch") or "") or None
 
 
+def base_branch(cfg):
+    """The branch new work starts from (origin/<base>, freshly fetched) and PRs target: git.base, else master."""
+    return str(((cfg or {}).get("git") or {}).get("base") or "") or DEFAULT_BASE
+
+
 def protected_branches(cfg, root):
-    """Never pushed to by agents. The staging branch is the one exception (DEV deploys into it),
-    unless a misconfigured repo also uses it as base."""
+    """Never pushed to by agents: the base, origin's default branch (both main and master while it is unknown),
+    git.protected. The staging branch is the one exception (DEV deploys into it); validate_config fails a staging branch
+    that is the base."""
     git_cfg = (cfg or {}).get("git") or {}
-    names = {str(b) for b in as_list(git_cfg.get("protected"))}
-    names.discard(staging_branch(cfg))
-    base = git_cfg.get("base") or default_branch(root)
+    names = {str(b) for b in as_list(git_cfg.get("protected"))} | {base_branch(cfg)}
     default = default_branch(root)
-    names |= {b for b in (base, default) if b} or {"main", "master"}  # origin/HEAD unset: the likely base must not stay open
+    names |= {default} if default else {"main", "master"}
     return names - {staging_branch(cfg)}
 
 

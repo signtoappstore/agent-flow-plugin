@@ -12,16 +12,19 @@ Làm **theo thứ tự**. Precondition fail → nói đúng cách sửa rồi **
 ## 1. Preconditions
 
 ```bash
-git rev-parse --show-toplevel && git remote get-url origin && python3 --version
+git rev-parse --show-toplevel && git config remote.origin.url && python3 --version
 ```
 
 Không phải git repo / không có `origin` GitHub / không có `python3` (≥3.9) → dừng với hướng dẫn cụ thể. Mọi path dưới đây relative tới repo root.
 
 ## 2. Secret file guard — TRƯỚC khi nói tới token
 
+Ghi vào exclude riêng của repo, không sửa `.gitignore` của project:
+
 ```bash
+X="$(git rev-parse --git-common-dir)/info/exclude"; mkdir -p "$(dirname "$X")"
 for p in .claude/settings.local.json .claude/worktrees/; do
-  git check-ignore -q "$p" || { [ -s .gitignore ] && [ -n "$(tail -c1 .gitignore)" ] && echo >> .gitignore; echo "$p" >> .gitignore; }
+  git check-ignore -q "$p" || { [ -s "$X" ] && [ -n "$(tail -c1 "$X")" ] && echo >> "$X"; echo "/$p" >> "$X"; }
 done
 git check-ignore -q .claude/settings.local.json && echo ignored || echo "WARN not ignored"
 git ls-files --error-unmatch .claude/settings.local.json >/dev/null 2>&1 && echo "WARN tracked — git rm --cached .claude/settings.local.json" || echo untracked
@@ -46,7 +49,7 @@ Bắt buộc **full scope** (mọi scope classic token): `whoami` exit 1 ⇒ **d
 
 | Key | Cách đề xuất |
 |---|---|
-| `git.base` | nhánh PR đang nhắm tới (CONTRIBUTING / PR gần đây); mặc định default branch |
+| `git.base` | nhánh PR nhắm tới (CONTRIBUTING / PR gần đây); việc mới tạo từ `origin/<git.base>`. `master` ⇒ để `null` |
 | `git.protected` | nhánh môi trường/deploy (vd `production`, `main`), **không** gồm nhánh staging |
 | `staging.branch` | nhánh chỉ để build test (`staging`, `develop`…), **khác** `git.base`, bắt buộc có trên origin. Không có → đề nghị tạo từ base, người đồng ý mới push |
 | `git.branch` | pattern của nhánh gần đây; mặc định `{type}/{issue}-{slug}` |
