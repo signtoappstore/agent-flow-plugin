@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""agentflow-settings, agentflow-journal, agentflow-notify, agentflow-base, mcp-headers, result-check: run as the user runs them."""
+"""agentflow-settings, agentflow-journal, agentflow-notify, agentflow-base, agentflow-audit, mcp-headers, result-check: run as
+the user runs them."""
 
 import json
 import os
@@ -615,6 +616,210 @@ class E2E(RepoCase):
         self.assertIn("error: x", out["tail"])
 
 
+AUDIT_CONFIG = """schema: 5
+labels:
+  platform: {web: "platform:web", mobile: "platform:mobile"}
+surfaces:
+  web:
+    path: "web/"
+    platform: "web"
+    e2e_dir: ".maestro"
+forbidden: ["web/src/secret/**"]
+"""
+SAME = "".join("  const step%d = total * %d + offset;\n" % (i, i) for i in range(10))
+AUDIT_FILES = {
+    "agentflow.yaml": AUDIT_CONFIG,
+    "web/src/features/cart/cart.ts": "import { pay } from '../pay/pay'\n// TODO: tách giỏ hàng\nexport function cart() { return pay() }\n",
+    "web/src/features/pay/pay.ts": "import { cart } from '../cart/cart'\nexport function pay() {\n  try { return cart() } catch (e) {}\n  console.log('paid')\n}\n",
+    "web/src/features/cart/format.ts": "export function a(total, offset) {\n" + SAME + "}\n",
+    "web/src/features/pay/format.ts": "export function b(total, offset) {\n" + SAME + "}\n",
+    "web/src/domain/order.ts": "import { api } from '../data/api'\nexport const order = api\n",
+    "web/src/data/api.ts": "export const api = 'https://staging.example.com/v1'\n",
+    "web/src/features/cart/view.tsx": "export const V = () => <button data-testid=\"cart_checkout\" />\n",
+    "web/src/auth/login.tsx": "export const L = () => <form><input data-testid=\"login_email\" /><input data-testid=\"login_password\" /></form>\n",
+    "web/src/secret/keys.ts": "".join("export const k%d = %d\n" % (i, i) for i in range(400)),
+    "web/.maestro/shared/login.yaml": "url: ${STAGING_URL}\n---\n- tapOn:\n    id: login_email\n- inputText: ${EMAIL}\n- tapOn:\n    id: login_password\n- inputText: hunter2\n",
+    "web/.maestro/checkout.yaml": "url: ${STAGING_URL}\nname: Checkout\ntags: [smoke, pay]\n---\n- runFlow: shared/login.yaml\n- tapOn:\n    id: cart_checkout\n- assertVisible:\n    id: pay_done\n",
+    "web/.maestro/profile.yaml": "url: ${STAGING_URL}\n---\n- tapOn: \"Profile\"\n- tapOn:\n    point: \"50%,50%\"\n    optional: true\n",
+    "web/.maestro/config.yaml": "flows:\n  - \"*.yaml\"\n",
+}
+QA_FINDINGS = """# audit qa · o/r @abc1234 · 2026-11-24
+Phạm vi: web · Đã chạy: 2 flow · Không chạy được: mobile (không có thiết bị)
+
+## F1. Báo lỗi khi bấm thanh toán lúc mất mạng
+- fp: qa/checkout/offline-no-feedback
+- type: Bug
+- sev: cao
+- effort: S
+- platform: web
+- evidence: audit-checkout-offline.png (state: bấm Thanh toán, mất mạng)
+
+### Các bước tái hiện
+1. Đăng nhập, thêm hàng, tắt mạng, bấm Thanh toán
+### Tiêu chí nghiệm thu
+- [ ] Khi mất mạng và bấm Thanh toán, thì người dùng thấy thông báo thử lại trong 1 giây
+
+## F2. Phủ automation cho luồng hồ sơ
+- fp: qa/profile/no-flow
+- type: Task
+- sev: thấp
+- effort: M
+- evidence: profile.yaml: no_assert, optional, point
+
+### Tiêu chí nghiệm thu
+- [ ] Flow hồ sơ assert tên người dùng sau khi lưu
+
+## F3. Báo lỗi khi bấm thanh toán lúc mất mạng (lặp)
+- fp: qa/checkout/offline-no-feedback
+- type: Bug
+- sev: vừa
+- effort: S
+- evidence: lần chạy thứ hai
+
+### Tiêu chí nghiệm thu
+- [ ] như F1
+
+## Ngoài danh sách
+- 4 mục thấp về khoảng cách chữ
+"""
+ARCH_FINDINGS = """# audit arch · o/r @abc1234 · 2026-11-24
+
+## F1. Cắt vòng phụ thuộc giữa giỏ hàng và thanh toán
+- fp: arch/features-cart-pay/cycle
+- type: Task
+- sev: vừa
+- effort: M
+- evidence: scan cycles: web/src/features/cart ↔ web/src/features/pay
+- regressed: #12
+
+### Tiêu chí nghiệm thu
+- [ ] `agentflow-audit scan web` không còn cycle cart ↔ pay
+
+## F2. Mục viết sai
+- fp: Arch/Bad Line 12
+- type: Chore
+- sev: urgent
+- effort: XL
+- platform: desktop
+- evidence: x
+
+không có tiêu chí
+"""
+
+
+class Audit(RepoCase):
+    """agentflow-audit: the numbers that tell the auditor where to read, and the findings file the checklist files."""
+
+    git = Style.git
+    write = Style.write
+
+    def setUp(self):
+        super().setUp()
+        for rel, text in AUDIT_FILES.items():
+            self.write(rel, text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "base")
+        for n in range(3):  # cart and pay always change together, from two folders
+            for rel in ("web/src/features/cart/cart.ts", "web/src/features/pay/pay.ts"):
+                with open(os.path.join(self.repo, rel), "a", encoding="utf-8") as fh:
+                    fh.write("// change %d\n" % n)
+            self.git("commit", "-q", "-am", "change %d" % n)
+
+    def audit(self, *args, code=0):
+        res = tool("agentflow-audit", *args, cwd=self.repo)
+        self.assertEqual(res.returncode, code, res.stdout + res.stderr)
+        return res.stdout
+
+    def test_scan_points_at_cycles_upward_imports_duplicates_and_hotspots(self):
+        out = json.loads(self.audit("scan", "--top", "5"))
+        self.assertEqual(out["paths"], ["web"])
+        self.assertEqual([c["modules"] for c in out["cycles"]], [["web/src/features/cart", "web/src/features/pay"]])
+        self.assertEqual(out["cycles"][0]["edges"][0]["at"], "web/src/features/cart/cart.ts:1")
+        self.assertEqual(out["upward"]["examples"], [{"rule": "domain→data", "at": "web/src/domain/order.ts:1", "to": "web/src/data/api.ts"}])
+        self.assertEqual(out["duplicates"]["blocks"], 1)
+        self.assertEqual(out["duplicates"]["top"][0]["lines"], 10)
+        self.assertEqual({h["path"] for h in out["hotspots"]}, {"web/src/features/cart/cart.ts", "web/src/features/pay/pay.ts"})
+        self.assertEqual(out["coupling"], [{"a": "web/src/features/cart/cart.ts", "b": "web/src/features/pay/pay.ts", "together": 4, "ratio": 1.0}])
+        self.assertEqual(out["smells"]["empty_catch"]["at"], ["web/src/features/pay/pay.ts:3"])
+        self.assertEqual(out["smells"]["debug_print"]["count"], 1)
+        self.assertEqual(out["smells"]["hardcoded_env_url"]["at"], ["web/src/data/api.ts:1"])
+        self.assertEqual(out["markers"]["count"], 1)
+        self.assertNotIn("web/src/secret/keys.ts", json.dumps(out))  # forbidden: never opened, never listed
+
+    def test_scan_of_one_folder(self):
+        out = json.loads(self.audit("scan", "web/src/domain", "web/src/data"))
+        self.assertEqual(out["cycles"], [])
+        self.assertEqual(out["upward"]["count"], 1)
+        self.assertEqual(sorted(out["size"]), ["ts"])
+
+    def test_flows_lint_and_stale_ids(self):
+        out = json.loads(self.audit("flows"))
+        web = out["surfaces"][0]
+        self.assertEqual((web["surface"], web["dir"], web["flows"], web["subflows"]), ("web", "web/.maestro", 2, 1))
+        self.assertEqual(web["tags"], {"smoke": 1, "pay": 1})
+        self.assertEqual([s["id"] for s in web["stale_ids"]], ["pay_done"])
+        self.assertEqual(web["issues"]["no_assert"], ["web/.maestro/profile.yaml"])
+        self.assertEqual(web["issues"]["credential_literal"], ["web/.maestro/shared/login.yaml"])
+        by_file = {f["file"]: f for f in out["flows"]}
+        self.assertEqual(sorted(by_file["web/.maestro/profile.yaml"]["issues"]), ["no_assert", "no_tags", "optional", "point", "text_selectors"])
+        self.assertEqual(by_file["web/.maestro/checkout.yaml"]["issues"], [])
+        self.assertNotIn("web/.maestro/config.yaml", by_file)  # workspace config, not a flow
+
+    def test_ids_built_at_run_time_labels_and_vacuous_asserts(self):
+        self.write("web/src/features/cart/list.tsx", "export const R = (i) => <li data-testid={`cart-row-${i}`} />\n")
+        self.write("web/src/ui/stepper.tsx", "export const S = ({ id }) => <button data-testid={`${id}-increase`} />\n")
+        self.write("web/.maestro/cart.yaml", "url: ${STAGING_URL}\ntags: [cart]\n---\n- tapOn:\n    id: cart-row-0\n"
+                   "- tapOn: {id: cart-qty-increase}\n- assertNotVisible:\n    id: cart-legacy-banner\n- extendedWaitUntil:\n"
+                   "    notVisible:\n      id: cart_checkout\n    timeout: 5000\n- assertVisible:\n    id: \"Remove item 2\"\n"
+                   "- assertVisible:\n    id: cart-gone-for-good\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "cart flow")
+        web = json.loads(self.audit("flows"))["surfaces"][0]
+        self.assertEqual([s["id"] for s in web["stale_ids"]], ["cart-gone-for-good", "pay_done"])
+        self.assertEqual(web["vacuous_ids"], [{"id": "cart-legacy-banner", "flows": ["web/.maestro/cart.yaml"]}])
+        cart = next(f for f in json.loads(self.audit("flows"))["flows"] if f["file"] == "web/.maestro/cart.yaml")
+        self.assertNotIn("text_selectors", cart["issues"])  # one label among five ids
+
+    def test_flows_without_surfaces_find_specs_by_folder_name(self):
+        self.write("agentflow.yaml", "schema: 5\n")
+        self.write("e2e/home.spec.ts", "import { test, expect } from '@playwright/test'\ntest.only('home', async ({ page }) => {\n"
+                                       "  await page.waitForTimeout(3000)\n  await page.locator('xpath=//div[2]').click()\n})\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "specs")
+        out = json.loads(self.audit("flows"))
+        spec = next(s for s in out["specs"] if s["file"] == "e2e/home.spec.ts")
+        self.assertEqual(spec["framework"], "playwright")
+        self.assertEqual(sorted(spec["issues"]), ["hard_wait", "no_assert", "only", "xpath_or_nth"])
+
+    def test_findings_merge_rank_and_report_errors(self):
+        self.write("out/qa.md", QA_FINDINGS)
+        self.write("out/arch.md", ARCH_FINDINGS)
+        out = json.loads(self.audit("findings", "out/qa.md", "out/arch.md", code=1))
+        self.assertEqual([f["id"] for f in out["findings"]], ["qa:F1", "arch:F1", "qa:F2"])
+        self.assertEqual(out["findings"][0]["also"], ["qa:F3"])  # same fp twice: the higher sev stays
+        self.assertEqual(out["findings"][0]["platform"], ["web"])
+        self.assertEqual(out["findings"][1]["regressed"], "#12")
+        self.assertEqual(out["by_sev"], {"cao": 1, "vừa": 1, "thấp": 1})
+        self.assertNotIn("body", out["findings"][0])
+        [error] = out["errors"]
+        self.assertEqual(error["id"], "arch:F2")
+        for part in ("type phải", "sev phải", "effort phải", "fp `Arch/Bad Line 12`", "platform desktop", "thiếu tiêu chí"):
+            self.assertIn(part, error["error"])
+
+    def test_findings_body_is_the_ticket_only(self):
+        self.write("out/qa.md", QA_FINDINGS)
+        body = self.audit("findings", "out/qa.md", "--body", "qa:F2")
+        self.assertTrue(body.startswith("### Tiêu chí nghiệm thu"))
+        self.assertNotIn("Ngoài danh sách", body)
+        self.assertNotIn("- fp:", body)
+        self.assertEqual(json.loads(self.audit("findings", "out/qa.md", "--body", "qa:F9", code=3))["error"][:9], "không có ")
+
+    def test_findings_need_the_lens_line(self):
+        self.write("out/x.md", QA_FINDINGS.split("\n", 1)[1])
+        out = json.loads(self.audit("findings", "out/x.md", code=1))
+        self.assertIn("thiếu dòng đầu", out["errors"][0]["error"])
+
+
 class Base(unittest.TestCase):
     """agentflow-base: a ticket's worktree comes from origin, whatever the person does in the main checkout meanwhile."""
 
@@ -763,6 +968,33 @@ class Base(unittest.TestCase):
         self.git(self.main, "switch", "-q", "feat/7-x")  # free for the person now
         self.assertEqual(self.git(self.main, "rev-parse", "feat/7-x"), local)
 
+    def test_audit_worktree_is_reset_to_the_fresh_base_each_time(self):
+        wt = os.path.join(self.main, ".claude", "worktrees", "af-audit")
+        out = self.base("audit")
+        self.assertEqual((out["path"], out["sync"], out["base"], out["head"]), (wt, "created", "master", self.git(self.main, "rev-parse", "origin/master")))
+        self.assertEqual(self.git(wt, "rev-parse", "HEAD"), out["head"])
+        self.git(self.other, "fetch", "-q", "origin")
+        self.git(self.other, "switch", "-q", "-C", "master", "origin/master")
+        self.write(self.other, ".gitignore", "build/\n")
+        self.commit(self.other, "ignore build")
+        self.git(self.other, "push", "-q", "origin", "master")
+        os.makedirs(os.path.join(wt, "_audit"))
+        os.makedirs(os.path.join(wt, "build"))
+        self.write(wt, "_audit/checkout.yaml", "url: x\n")  # scratch flow of the last audit
+        self.write(wt, "build/app.bin", "deps\n")  # ignored once the new base is checked out: kept for the next build
+        self.write(wt, "a.txt", "edited by a build\n")
+        self.write(self.main, "a.txt", "the person's own edit\n")
+        out = self.base("audit")
+        self.assertEqual((out["sync"], out["head"]), ("reset", self.git(self.main, "rev-parse", "origin/master")))
+        self.assertEqual(self.git(wt, "rev-parse", "HEAD"), out["head"])
+        self.assertFalse(os.path.exists(os.path.join(wt, "_audit")))
+        self.assertTrue(os.path.isfile(os.path.join(wt, "build", "app.bin")))
+        self.assertEqual(self.git(wt, "status", "--porcelain"), "")
+        self.assertEqual(self.git(self.main, "status", "--porcelain"), "M a.txt")  # the main checkout is the person's
+        self.assertEqual(self.git(self.main, "branch", "--format=%(refname:short)"), "master")
+        self.assertEqual(self.base("clean", "--issue", "7")["removed"], [])  # ticket cleanup never takes the audit worktree
+        self.assertTrue(os.path.isdir(wt))
+
     def test_refuses_base_protected_staging_and_bad_names(self):
         for branch in ("master", "production", "staging", "-x", "a..b"):
             with self.subTest(branch):
@@ -807,6 +1039,11 @@ class ResultCheck(unittest.TestCase):
 
     def test_blocks_only_once(self):
         self.assertEqual(self.check("không có", active=True), "")
+
+    def test_the_auditor_reports_on_no_ticket(self):
+        self.assertEqual(self.check("RESULT: audit · ok\nNOTE: 7 phát hiện", agent="agentflow:audit"), "")
+        self.assertEqual(json.loads(self.check("RESULT: in_review · ok", agent="agentflow:audit"))["decision"], "block")
+        self.assertEqual(json.loads(self.check("RESULT: audit · ok"))["decision"], "block")  # a DEV always has a ticket stage
 
     def test_other_agents_untouched(self):
         self.assertEqual(self.check("không có", agent="Explore"), "")

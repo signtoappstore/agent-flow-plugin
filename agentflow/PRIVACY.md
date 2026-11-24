@@ -8,6 +8,7 @@ AgentFlow chạy trên máy của bạn, bằng token của bạn. Plugin không
 | Nội dung file thiết kế | Figma MCP (`mcp.figma.com`) | Chỉ khi `design.figma: true` và bạn đã OAuth |
 | Tên repo, số issue, tiêu đề ticket, link | Telegram Bot API (`api.telegram.org`) | Chỉ khi `notify.telegram: true` |
 | Code và nội dung agent đọc | Anthropic, theo điều khoản tài khoản Claude Code của bạn | Như mọi session Claude Code |
+| Từ khoá lĩnh vực sản phẩm (không tên khách hàng, code, dữ liệu nội bộ) | Công cụ WebSearch của Claude Code | `/agentflow:checklist product`, khi tìm kỳ vọng phổ biến của người dùng |
 
 **Lưu trên máy**
 
@@ -15,5 +16,6 @@ AgentFlow chạy trên máy của bạn, bằng token của bạn. Plugin không
 - Secret khác (Telegram): block `env` trong `.claude/settings.local.json` của từng repo (gitignored, mode 600).
 - Journal friction: `~/.claude/agentflow/journal.jsonl`, một dòng cho mỗi friction, chuỗi giống token bị thay bằng `<secret>` trước khi ghi. Xoá file bất cứ lúc nào.
 - Log build/test: `/tmp/af-<n>*.log`.
+- Kết quả `/agentflow:checklist`: file phát hiện ở `/tmp/af-audit-*`, log và ảnh chụp staging của lượt chạy flow ở `/tmp/af-0-e2e/`; worktree `.claude/worktrees/af-audit` (bản sao `origin/<base>`, xoá bằng `git worktree remove`). Ảnh chỉ agent xem, không gửi dịch vụ AI ngoài.
 
 **Lưu ý**: agent dùng token của bạn nên mọi comment trên GitHub đứng tên bạn. Token phải có full scope (mọi scope của classic token), nên agent về kỹ thuật làm được mọi việc tài khoản của bạn làm được; hook guard chặn các thao tác không lấy lại được (merge/approve PR, force-push, xoá nhánh remote, xoá repo/package, dispatch workflow) nhưng chỉ ở mức best-effort. Token lộ ra ngoài cũng mang đủ quyền đó. Guard chặn gọi tool có tham số chứa chuỗi giống token thật, nhưng chỉ nhận ra các định dạng phổ biến. Xem [`DESIGN-NOTES.md`](DESIGN-NOTES.md) §Giới hạn đã biết.

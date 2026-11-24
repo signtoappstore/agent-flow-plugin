@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """AgentFlow SubagentStop check: an agent ends with the RESULT block (protocol §13), since that block is all the
-orchestrator reads. Missing or malformed → the agent gets one more turn to write it. Never blocks twice."""
+orchestrator reads. Missing or malformed → the agent gets one more turn to write it. Never blocks twice. The auditor of
+/agentflow:checklist works on no ticket: its stage is `audit`."""
 
 import json
 import os
@@ -21,8 +22,9 @@ def verdict(data):
     match = RESULT.search(str(data.get("last_assistant_message") or ""))
     if not match:
         return "Thiếu khối RESULT. " + HINT
-    if match.group(1) not in afconfig.STAGES:
-        return "`%s` không phải stage hợp lệ (%s). %s" % (match.group(1), ", ".join(afconfig.STAGES), HINT)
+    stages = ["audit"] if data.get("agent_type") == "agentflow:audit" else afconfig.STAGES  # the auditor has no ticket
+    if match.group(1) not in stages:
+        return "`%s` không phải stage hợp lệ (%s). %s" % (match.group(1), ", ".join(stages), HINT)
     return None
 
 

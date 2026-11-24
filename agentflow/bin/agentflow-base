@@ -12,6 +12,9 @@ worktrees, branches, index or .gitignore: `.claude/worktrees/` goes to the repo'
                                         `git -C <path> push origin HEAD:refs/heads/B`
   clean --issue N [--issue M ...] | --staging
                                         remove af-<n> worktrees that hold nothing unpushed · remove leftover af-*-staging
+  audit [--no-fetch]                    create or reset <root>/.claude/worktrees/af-audit for /agentflow:checklist, detached
+                                        at the fresh origin/<base>; the last audit's scratch (untracked files, edits) is
+                                        dropped, ignored deps and builds stay for the next audit. One JSON line
 
 worktree keeps what an earlier run left (uncommitted edits, commits not pushed yet), brings origin/B in when someone pushed
 to it (fast-forward, or a merge when the worktree is clean), and refuses (exit 1) to drop work of another branch.
@@ -33,6 +36,7 @@ import afconfig  # noqa: E402
 ENV = dict(os.environ, GIT_TERMINAL_PROMPT="0")  # never wait on a credential prompt
 ENV.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=15")
 WORKTREES = os.path.join(".claude", "worktrees")
+AUDIT = "af-audit"  # /agentflow:checklist; never an af-<n>, so ticket cleanup and the DEV's write rule leave it alone
 EXCLUDE = "/.claude/worktrees/"
 BRANCH_FILE = "agentflow-branch"  # in the worktree's private git dir: the branch it works for
 NO_REMOTE_REF = re.compile(r"couldn't find remote ref|no such ref|not our ref", re.I)
@@ -247,6 +251,36 @@ def cmd_worktree(a):
     emit(report)
 
 
+def cmd_audit(a):
+    """The auditor reads the base as it is on origin and may only write scratch flows in here: nothing to keep, so it is
+    reset each time rather than synced like a ticket's worktree."""
+    root = root_of()
+    _, base, base_sha = resolve(root, not a.no_fetch)
+    path = os.path.join(root, WORKTREES, AUDIT)
+    start = "refs/remotes/origin/" + base
+    exclude_worktrees(root)
+    forget_missing(root, path)
+    if os.path.realpath(path) in registered(root):
+        res = git(path, "checkout", "-q", "-f", "--detach", start)
+        if res.returncode != 0:
+            fail("không checkout được %s: %s" % (start, last_line(res.stderr)), path=path)
+        git(path, "clean", "-q", "-f", "-d")
+        sync = "reset"
+    else:
+        if os.path.isdir(path) and os.listdir(path):
+            fail("%s có sẵn mà không phải worktree — người dọn tay" % path, path=path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        res = git(root, "worktree", "add", "-q", "--detach", path, start)
+        if res.returncode != 0:
+            fail("git worktree add lỗi: %s" % last_line(res.stderr), path=path)
+        sync = "created"
+    report = {"path": path, "base": base, "head": base_sha, "sync": sync}
+    state = submodules(path)
+    if state:
+        report["submodules"] = state
+    emit(report)
+
+
 def cmd_clean(a):
     root = root_of()
     known = registered(root)
@@ -277,10 +311,12 @@ def main():
     s = sub.add_parser("clean")
     s.add_argument("--issue", type=int, action="append")
     s.add_argument("--staging", action="store_true", help="dọn worktree staging tạm còn sót (không có agent đang chạy)")
+    s = sub.add_parser("audit")
+    s.add_argument("--no-fetch", action="store_true", help="dùng origin/<base> đã fetch, không gọi mạng")
     a = p.parse_args()
     if a.cmd == "clean" and not (a.issue or a.staging):
         p.error("clean cần --issue N hoặc --staging")
-    {"worktree": cmd_worktree, "clean": cmd_clean}[a.cmd](a)
+    {"worktree": cmd_worktree, "clean": cmd_clean, "audit": cmd_audit}[a.cmd](a)
 
 
 if __name__ == "__main__":

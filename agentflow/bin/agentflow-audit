@@ -1,0 +1,836 @@
+#!/usr/bin/env python3
+"""AgentFlow audit helper (stdlib only): cheap, repeatable evidence for /agentflow:checklist. The auditor reads the few
+files the numbers point at instead of the whole repo, and its findings come back in a shape the checklist can merge,
+rank and file as tickets.
+
+  scan [--days N] [--top N] [--depth N] [PATH ...]
+        architecture radar of the tracked code under PATH (default: the surfaces of agentflow.yaml, else the repo):
+        size, largest files, hotspots (commits x lines), files that change together across folders, import cycles and
+        upward imports between folders, duplicated blocks, TODO markers, smells (empty catch, suppressions, debug
+        prints, hardcoded environment URLs)
+  flows [PATH ...]
+        e2e inventory + robustness lint: Maestro flows (tags, ids, asserts, optional/retry/point/text selectors,
+        clearState, literal credentials, AI asserts, ids no client code defines any more) and specs of Playwright,
+        Cypress, Detox, Flutter integration_test (hard waits, only/skip, xpath/nth, no expect)
+  findings FILE ... [--body ID]
+        check + merge the auditors' findings files into one ranked index (one JSON line; exit 1 with errors to fix);
+        --body ID prints that finding's ticket body
+
+Run it inside the audit worktree (`agentflow-base audit`): git there sees origin/<base>, not the person's checkout.
+Numbers say where to look, not what is wrong: the auditor reads the code before it writes a finding.
+"""
+
+import argparse
+import collections
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "scripts"))
+import afconfig  # noqa: E402
+
+LANGS = {".ts": "ts", ".tsx": "ts", ".js": "js", ".jsx": "js", ".mjs": "js", ".cjs": "js", ".vue": "vue", ".svelte": "svelte",
+         ".dart": "dart", ".py": "py", ".go": "go", ".java": "java", ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift",
+         ".m": "objc", ".mm": "objc", ".rb": "ruby", ".php": "php", ".cs": "csharp", ".rs": "rust", ".scala": "scala",
+         ".c": "c", ".cc": "cpp", ".cpp": "cpp", ".h": "c", ".hpp": "cpp"}
+GENERATED = re.compile(r"(^|/)(node_modules|vendor|third_party|build|dist|out|coverage|\.dart_tool|\.next|\.nuxt|Pods|\.gradle|"
+                       r"generated|__generated__|\.claude)/|\.(g|freezed|gr|mocks|pb)\.dart$|\.min\.js$|\.d\.ts$|\.pb\.\w+$")
+TESTS = re.compile(r"(^|/)(tests?|__tests__|__mocks__|specs?|e2e|integration_test|\.maestro|maestro|cypress|playwright)/"
+                   r"|[._-](test|spec|e2e|cy)\.\w+$|_test\.\w+$|(^|/)test_[^/]*\.py$")
+MAX_BYTES = 1_000_000
+WINDOW = 6  # significant lines that make a duplicated block
+SWEEP = 50  # a commit touching more code files is a sweep (rename, format, big merge), not a sign of coupling; squash-merged
+            # tickets often touch 20-30 files, so a lower cap would leave out most commits of a repo the agents work on
+TRIVIAL = re.compile(r"^([\]\[{}()<>;,.:]*|(import|export|from|package|using|require|library|part|#include|@\w+)\b.*|(//|#|\*|/\*|--|<!--).*)$")
+MARKER = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b")
+UI = {"presentation", "ui", "widgets", "widget", "screens", "screen", "pages", "page", "views", "view", "components", "component"}
+DOMAIN = {"domain", "usecases", "usecase", "entities", "entity"}
+DATA = {"data", "repository", "repositories", "infrastructure", "infra", "api", "services", "service", "datasources", "datasource"}
+UPWARD = {("domain", "data"): "domain→data", ("domain", "ui"): "domain→ui", ("data", "ui"): "data→ui"}
+JS_LIKE = ("ts", "js", "vue", "svelte")
+SMELLS = [  # name, languages (None = every language), pattern on the whole text
+    ("empty_catch", JS_LIKE + ("java", "kotlin", "dart", "swift", "csharp", "php", "scala"),
+     re.compile(r"catch\s*(\([^)]*\))?\s*\{\s*\}")),
+    ("empty_except", ("py",), re.compile(r"except[^:\n]*:\s*(\n\s*)?(pass|\.\.\.)\s*$", re.M)),
+    ("suppressed_check", JS_LIKE + ("dart",), re.compile(r"@ts-(ignore|nocheck)|eslint-disable|//\s*ignore(_for_file)?:")),
+    ("any_type", ("ts",), re.compile(r":\s*any\b|\bas any\b|<any>")),
+    ("force_unwrap", ("kotlin", "swift"), re.compile(r"\w!!|\btry!|\bas!")),
+    ("debug_print", JS_LIKE + ("dart", "kotlin", "java", "swift"),
+     re.compile(r"\bconsole\.(log|debug)\(|\bdebugPrint\(|^\s*print\(|\bprintln\(|System\.out\.print|\bNSLog\(", re.M)),
+    ("hardcoded_env_url", None, re.compile(r"https?://[^\s'\"`]*(localhost|127\.0\.0\.1|10\.0\.2\.2|192\.168\.|staging|\bdev\.)")),
+]
+MANIFESTS = {"package.json", "pubspec.yaml", "build.gradle", "build.gradle.kts", "Podfile", "Package.swift", "go.mod",
+             "requirements.txt", "pyproject.toml", "Gemfile", "composer.json", "Cargo.toml", "pom.xml"}
+CI_WORDS = {"lint": r"\blint\b|eslint|ktlint|swiftlint", "types": r"typecheck|\btsc\b|analyze|mypy",
+            "test": r"\btest\b|jest|vitest|pytest", "e2e": r"\be2e\b|maestro|playwright|cypress|detox",
+            "build": r"\bbuild\b", "deploy": r"\bdeploy\b|release|testflight|firebase"}
+
+
+def emit(obj, code=0):
+    print(json.dumps(obj, ensure_ascii=False))
+    sys.exit(code)
+
+
+def git(cwd, *args, timeout=120):
+    try:
+        res = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, errors="replace", timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return res.stdout if res.returncode == 0 else ""
+
+
+def context():
+    """(root of the worktree we run in, agentflow.yaml in force or {})."""
+    root = afconfig.repo_root()
+    if not root:
+        emit({"error": "không ở trong git repo — chạy trong worktree audit (agentflow-base audit)"}, 3)
+    try:
+        cfg = afconfig.load_config(root) or {}
+    except ValueError:
+        cfg = {}
+    return root, cfg
+
+
+def surfaces(cfg):
+    out = []
+    for key, s in ((cfg.get("surfaces") or {}).items()):
+        if isinstance(s, dict):
+            out.append((key, str(s.get("path") or ".").strip("/") or ".", str(s.get("e2e_dir") or "").strip("/")))
+    return out
+
+
+def scope(cfg, paths):
+    if paths:
+        return [p.strip("/") or "." for p in paths]
+    return sorted({p for _, p, _ in surfaces(cfg)}) or ["."]
+
+
+def tracked(root, paths, cfg):
+    """Tracked files under `paths`, without generated/vendored code and without forbidden (secret) paths: never opened."""
+    rules = [(pat, afconfig._glob_to_regex(pat)) for pat in afconfig.forbidden_patterns(cfg)]
+    listing = git(root, "ls-files", "-z", "--", *paths)
+    return [p for p in listing.split("\0") if p and not GENERATED.search(p)
+            and not any(rx.match(p if "/" in pat else os.path.basename(p)) for pat, rx in rules)]
+
+
+def read_text(root, rel):
+    path = os.path.join(root, rel)
+    try:
+        if os.path.getsize(path) > MAX_BYTES:
+            return None
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def line_of(text, pos):
+    return text.count("\n", 0, pos) + 1
+
+
+def top(counter, n, key="path", value="count"):
+    return [{key: k, value: v} for k, v in counter.most_common(n)]
+
+
+# ── scan ────────────────────────────────────────────────────────────────────
+
+
+class Code:
+    """Tracked source files under the scanned paths, read once."""
+
+    def __init__(self, root, paths, cfg):
+        self.root, self.paths = root, paths
+        self.listing = tracked(root, paths, cfg)
+        self.files = {}
+        for rel in self.listing:
+            lang = LANGS.get(os.path.splitext(rel)[1].lower())
+            text = read_text(root, rel) if lang else None
+            if text is not None:
+                self.files[rel] = (lang, text, bool(TESTS.search(rel)))
+
+    def source(self):
+        return ((rel, lang, text) for rel, (lang, text, test) in self.files.items() if not test)
+
+
+def loc(text):
+    return sum(1 for line in text.splitlines() if line.strip())
+
+
+def history(root, paths, days):
+    """[(author, date, [paths])] of the non-merge commits of the last `days` days."""
+    log = git(root, "log", "--since=%d.days.ago" % days, "--no-merges", "--no-renames", "--format=@%an\t%cs", "--name-only",
+              "--", *paths, timeout=300)
+    commits = []
+    for line in log.splitlines():
+        if line.startswith("@") and "\t" in line:
+            author, _, date = line[1:].partition("\t")
+            commits.append((author, date, []))
+        elif line.strip() and commits:
+            commits[-1][2].append(line.strip())
+    return commits
+
+
+def base_of(rel, paths):
+    """The scanned path that holds `rel` (the longest), "." for the repo root."""
+    return max((p for p in paths if p == "." or rel.startswith(p + "/")), key=len, default=".")
+
+
+def module_of(rel, paths, depth):
+    """Folder that stands for `rel` in the module graph: `depth` folders below the scanned path holding it."""
+    base = base_of(rel, paths)
+    inner = rel if base == "." else rel[len(base) + 1:]
+    parts = inner.split("/")[:-1][:depth]
+    return "/".join(([] if base == "." else [base]) + parts) or base
+
+
+def layer_of(rel):
+    """The outermost layer folder decides: `domain/repositories/` holds the domain's repository interfaces, not data."""
+    for part in rel.lower().split("/")[:-1]:
+        if part in UI:
+            return "ui"
+        if part in DOMAIN:
+            return "domain"
+        if part in DATA:
+            return "data"
+    return None
+
+
+IMPORTS = {
+    "js": re.compile(r"""(?:\bfrom\s+|\bimport\s*\(?\s*|\brequire\s*\(\s*|\bexport\s+\*\s+from\s+)['"]([^'"]+)['"]"""),
+    "dart": re.compile(r"""^\s*(?:import|export)\s+['"]([^'"]+)['"]""", re.M),
+    "py": re.compile(r"^\s*(?:from\s+(\.*[\w.]*)\s+import|import\s+([\w.]+))", re.M),
+    "go": re.compile(r'^\s*(?:import\s+)?(?:\w+\s+)?"([\w./-]+)"', re.M),
+    "jvm": re.compile(r"^\s*import\s+(?:static\s+)?([\w.]+)", re.M),
+}
+JS_EXT = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte")
+
+
+class Resolver:
+    """Map an import to a tracked file of the repo (only what can be resolved without the build tool: relative paths, the
+    `@/` and `src/` aliases, Dart `package:<self>/`, Python packages, Go module paths, Kotlin/Java packages)."""
+
+    def __init__(self, code):
+        self.code = code
+        self.known = set(code.files)
+        self.dart_pkgs, self.go_mods, self.packages = {}, {}, {}
+        self.by_dir = collections.defaultdict(list)
+        for rel in sorted(code.files):
+            self.by_dir[os.path.dirname(rel)].append(rel)
+        for rel in code.listing:
+            base = os.path.basename(rel)
+            if base == "pubspec.yaml":
+                m = re.search(r"^name:\s*([\w]+)", read_text(code.root, rel) or "", re.M)
+                if m:
+                    self.dart_pkgs[m.group(1)] = os.path.dirname(rel)
+            elif base == "go.mod":
+                m = re.search(r"^module\s+(\S+)", read_text(code.root, rel) or "", re.M)
+                if m:
+                    self.go_mods[m.group(1)] = os.path.dirname(rel)
+        for rel, (lang, text, _) in code.files.items():
+            if lang in ("kotlin", "java"):
+                m = re.search(r"^\s*package\s+([\w.]+)", text, re.M)
+                if m:
+                    self.packages.setdefault(m.group(1), rel)
+
+    def first(self, *candidates):
+        for c in candidates:
+            c = os.path.normpath(c)
+            if c in self.known:
+                return c
+        return None
+
+    def js(self, rel, spec):
+        home = base_of(rel, self.code.paths)
+        home = "" if home == "." else home
+        if spec.startswith("."):
+            base = os.path.join(os.path.dirname(rel), spec)
+        elif spec.startswith(("@/", "~/")):  # the usual alias of <surface>/src
+            base = os.path.join(home, "src", spec[2:])
+        elif spec.startswith("src/"):  # baseUrl at the surface root
+            base = os.path.join(home, spec)
+        else:
+            return None
+        return self.first(base, *(base + e for e in JS_EXT), *(os.path.join(base, "index" + e) for e in JS_EXT))
+
+    def dart(self, rel, spec):
+        if spec.startswith("package:"):
+            pkg, _, rest = spec[8:].partition("/")
+            home = self.dart_pkgs.get(pkg)
+            return self.first(os.path.join(home, "lib", rest)) if home is not None else None
+        if ":" in spec:
+            return None
+        return self.first(os.path.join(os.path.dirname(rel), spec))
+
+    def py(self, rel, spec):
+        dots = len(spec) - len(spec.lstrip("."))
+        name = spec[dots:].replace(".", "/")
+        if dots:
+            base = os.path.dirname(rel)
+            for _ in range(dots - 1):
+                base = os.path.dirname(base)
+            starts = [base]
+        else:
+            starts = [p for p in self.code.paths if p != "."] + [""]
+        for start in starts:
+            hit = self.first(*(os.path.join(start, name) + s for s in (".py", "/__init__.py")))
+            if hit:
+                return hit
+        return None
+
+    def go(self, rel, spec):
+        for mod, home in self.go_mods.items():
+            if spec == mod or spec.startswith(mod + "/"):
+                folder = os.path.normpath(os.path.join(home, spec[len(mod) + 1:]))
+                return next((f for f in self.by_dir.get("" if folder == "." else folder, ()) if not f.endswith("_test.go")), None)
+        return None
+
+    def jvm(self, rel, spec):
+        package = spec.rsplit(".", 1)[0]
+        return self.packages.get(package) or self.packages.get(spec)
+
+    def targets(self, rel, lang, text):
+        """[(line, target path)] of the imports of `rel` that resolve to a file of the repo."""
+        kind = "js" if lang in JS_LIKE else "jvm" if lang in ("kotlin", "java") else lang
+        pattern = IMPORTS.get(kind)
+        if not pattern:
+            return []
+        out = []
+        for m in pattern.finditer(text):
+            spec = next((g for g in m.groups() if g), "")
+            target = getattr(self, kind)(rel, spec) if spec else None
+            if target and target != rel:
+                out.append((line_of(text, m.start()), target))
+        return out
+
+
+def tarjan(graph):
+    """Strongly connected components of size ≥ 2 (iterative, no recursion limit)."""
+    index, low, on, stack, out, counter = {}, {}, set(), [], [], [0]
+    for start in sorted(graph):
+        if start in index:
+            continue
+        work = [(start, iter(sorted(graph.get(start, ()))))]
+        index[start] = low[start] = counter[0]
+        counter[0] += 1
+        stack.append(start)
+        on.add(start)
+        while work:
+            node, children = work[-1]
+            advanced = False
+            for child in children:
+                if child not in index:
+                    index[child] = low[child] = counter[0]
+                    counter[0] += 1
+                    stack.append(child)
+                    on.add(child)
+                    work.append((child, iter(sorted(graph.get(child, ())))))
+                    advanced = True
+                    break
+                if child in on:
+                    low[node] = min(low[node], index[child])
+            if advanced:
+                continue
+            work.pop()
+            if work:
+                low[work[-1][0]] = min(low[work[-1][0]], low[node])
+            if low[node] == index[node]:
+                comp = []
+                while True:
+                    item = stack.pop()
+                    on.discard(item)
+                    comp.append(item)
+                    if item == node:
+                        break
+                if len(comp) > 1:
+                    out.append(sorted(comp))
+    return out
+
+
+def dependencies(code, depth, n):
+    resolver = Resolver(code)
+    edges = collections.defaultdict(lambda: [0, None])  # (module, module) → [imports, first "path:line"]
+    upward = []
+    for rel, lang, text in code.source():
+        src_mod, src_layer = module_of(rel, code.paths, depth), layer_of(rel)
+        for line, target in resolver.targets(rel, lang, text):
+            if code.files[target][2]:
+                continue
+            dst_mod = module_of(target, code.paths, depth)
+            if dst_mod != src_mod:
+                edge = edges[(src_mod, dst_mod)]
+                edge[0] += 1
+                edge[1] = edge[1] or "%s:%d" % (rel, line)
+            rule = UPWARD.get((src_layer, layer_of(target)))
+            if rule:
+                upward.append({"rule": rule, "at": "%s:%d" % (rel, line), "to": target})
+    graph = collections.defaultdict(set)
+    for a, b in edges:
+        graph[a].add(b)
+    cycles = []
+    for comp in sorted(tarjan(graph), key=len, reverse=True)[:n]:
+        inside = sorted(((a, b), e) for (a, b), e in edges.items() if a in comp and b in comp)
+        cycles.append({"modules": comp, "edges": [{"from": a, "to": b, "imports": e[0], "at": e[1]} for (a, b), e in inside[:8]],
+                       "weakest": min(({"from": a, "to": b, "imports": e[0]} for (a, b), e in inside), key=lambda x: x["imports"])})
+    return cycles, {"count": len(upward), "examples": upward[:n]}
+
+
+def duplicates(code, n):
+    sig = {}
+    for rel, _, text in code.source():
+        lines = [(i, line.strip()) for i, line in enumerate(text.splitlines(), 1)]
+        sig[rel] = [(i, s) for i, s in lines if s and not TRIVIAL.match(s)]
+    index = collections.defaultdict(list)
+    for rel, rows in sig.items():
+        for i in range(len(rows) - WINDOW + 1):
+            index[hash(tuple(s for _, s in rows[i:i + WINDOW]))].append((rel, i))
+    pairs = collections.defaultdict(set)
+    for locs in index.values():
+        if len(locs) < 2 or len(locs) > 20:  # more than 20 copies is boilerplate the language asks for
+            continue
+        for other in locs[1:4]:
+            a, b = sorted([locs[0], other])
+            if a[0] == b[0] and b[1] - a[1] < WINDOW:
+                continue
+            pairs[(a[0], b[0])].add((a[1], b[1]))
+    blocks = []
+    for (fa, fb), starts in pairs.items():
+        for ia, ib in starts:
+            if (ia - 1, ib - 1) in starts:
+                continue
+            run = 1
+            while (ia + run, ib + run) in starts:
+                run += 1
+            length = run + WINDOW - 1
+            if length >= WINDOW + 2:
+                blocks.append((length, "%s:%d-%d" % (fa, sig[fa][ia][0], sig[fa][ia + length - 1][0]),
+                               "%s:%d-%d" % (fb, sig[fb][ib][0], sig[fb][ib + length - 1][0])))
+    blocks.sort(key=lambda b: (-b[0], b[1]))
+    return {"blocks": len(blocks), "top": [{"lines": l, "a": a, "b": b} for l, a, b in blocks[:n]]}
+
+
+def smells(code, n):
+    found = {}
+    for rel, lang, text in code.source():
+        for name, langs, pattern in SMELLS:
+            if langs is not None and lang not in langs:
+                continue
+            if lang == "py" and name == "debug_print":
+                continue
+            for m in pattern.finditer(text):
+                entry = found.setdefault(name, {"count": 0, "files": collections.Counter(), "at": []})
+                entry["count"] += 1
+                entry["files"][rel] += 1
+                if len(entry["at"]) < 3:
+                    entry["at"].append("%s:%d" % (rel, line_of(text, m.start())))
+    return {k: {"count": v["count"], "files": len(v["files"]), "top": top(v["files"], min(n, 5)), "at": v["at"]}
+            for k, v in sorted(found.items())}
+
+
+def cmd_scan(a):
+    root, cfg = context()
+    paths = scope(cfg, a.paths)
+    code = Code(root, paths, cfg)
+    size = collections.defaultdict(lambda: {"files": 0, "loc": 0})
+    test_loc, lines = 0, {}
+    markers = collections.Counter()
+    for rel, (lang, text, test) in code.files.items():
+        count = loc(text)
+        if test:
+            test_loc += count
+            continue
+        size[lang]["files"] += 1
+        size[lang]["loc"] += count
+        lines[rel] = count
+        hits = len(MARKER.findall(text))
+        if hits:
+            markers[rel] = hits
+    commits = history(root, paths, a.days)
+    churn, authors, last = collections.Counter(), collections.defaultdict(set), {}
+    pair = collections.Counter()
+    for author, date, files in commits:
+        touched = [f for f in files if f in lines]
+        for f in touched:
+            churn[f] += 1
+            authors[f].add(author)
+            last[f] = max(last.get(f, ""), date)
+        if 2 <= len(touched) <= SWEEP:
+            for i, f in enumerate(sorted(touched)):
+                for g in sorted(touched)[i + 1:]:
+                    if module_of(f, paths, a.depth) != module_of(g, paths, a.depth):
+                        pair[(f, g)] += 1
+    hot = sorted((f for f in churn if churn[f] >= 2), key=lambda f: (-churn[f] * lines[f], f))[:a.top]
+    coupling = []
+    for (f, g), together in pair.most_common():
+        ratio = together / float(min(churn[f], churn[g]))
+        if together >= 3 and ratio >= 0.6:
+            coupling.append({"a": f, "b": g, "together": together, "ratio": round(ratio, 2)})
+    cycles, upward = dependencies(code, a.depth, a.top)
+    listed = git(root, "ls-files", "--", *paths, ".github/workflows").splitlines()
+    ci = []
+    for rel in listed:
+        if rel.startswith(".github/workflows/") and rel.endswith((".yml", ".yaml")):
+            text = read_text(root, rel) or ""
+            ci.append({"file": rel, "runs": [k for k, p in CI_WORDS.items() if re.search(p, text, re.I)]})
+    emit({"root": root, "paths": paths, "days": a.days, "commits": len(commits),
+          "size": dict(sorted(size.items(), key=lambda kv: -kv[1]["loc"])), "test_loc": test_loc,
+          "largest": [{"path": f, "loc": lines[f]} for f in sorted(lines, key=lambda f: (-lines[f], f))[:a.top]],
+          "hotspots": [{"path": f, "loc": lines[f], "commits": churn[f], "authors": len(authors[f]), "last": last[f]} for f in hot],
+          "coupling": coupling[:a.top], "cycles": cycles, "upward": upward, "duplicates": duplicates(code, a.top),
+          "markers": {"count": sum(markers.values()), "top": top(markers, 5)}, "smells": smells(code, a.top),
+          "manifests": sorted(r for r in listed if os.path.basename(r) in MANIFESTS and not GENERATED.search(r)), "ci": ci})
+
+
+# ── flows ───────────────────────────────────────────────────────────────────
+
+E2E_GUESS = (".maestro", "maestro", "e2e", "tests/e2e", "test/e2e", "integration_test", "cypress", "playwright")
+SUBFLOW_DIR = re.compile(r"(^|/)(subflows?|shared|common|helpers?|utils?)/")
+MAESTRO_CMD = re.compile(r"^\s*-\s+(\w+)\s*(?::\s*(.*))?$")
+ASSERTS = {"assertVisible", "assertNotVisible", "assertTrue", "assertScreenshot", "extendedWaitUntil", "assertWithAI",
+           "assertNoDefectsWithAI"}
+AI = {"assertWithAI", "assertNoDefectsWithAI", "extractTextWithAI"}
+TAP = {"tapOn", "doubleTapOn", "longPressOn", "assertVisible", "assertNotVisible", "scrollUntilVisible", "copyTextFrom"}
+ID_VALUE = re.compile(r"""^id:\s*["']?([^"'\n#]+?)["']?\s*(?:#.*)?$""")
+INLINE_ID = re.compile(r"""\{[^}\n]*\bid:\s*["']?([^"',}\n]+?)["']?\s*[,}]""")
+KEY = re.compile(r"^(\w+):")
+ABSENT = {"assertNotVisible", "notVisible"}
+CREDENTIAL = re.compile(r"pass|password|otp|pin\b|secret|mật", re.I)
+SPEC = re.compile(r"\.(spec|test|cy|e2e)\.(ts|tsx|js|jsx|mjs|cjs)$|_test\.dart$")
+SPEC_LINT = [  # name, pattern
+    ("hard_wait", re.compile(r"waitForTimeout\(|cy\.wait\(\s*\d|\bsleep\(|Future\.delayed\(|setTimeout\(")),
+    ("only", re.compile(r"\b(test|it|describe)\.only\(|\bfit\(|\bfdescribe\(")),
+    ("skipped", re.compile(r"\b(test|it|describe)\.(skip|fixme)\(|\bxit\(|\bxdescribe\(|skip:\s*true")),
+    ("xpath_or_nth", re.compile(r"xpath=|//\w+\[|\.nth\(|:nth-child|\.eq\(\d")),
+]
+
+
+def e2e_dirs(cfg, files, paths):
+    """[(surface, e2e folder)]: e2e_dir of each surface, else the usual folder names that hold tracked files."""
+    def guess(path):
+        folders = [os.path.normpath(os.path.join(path, g)) for g in E2E_GUESS]
+        return [f for f in folders if any(x.startswith(f + "/") for x in files)]
+
+    declared = [(k, p, e) for k, p, e in surfaces(cfg) if not paths or any(q == "." or p == q or p.startswith(q + "/") for q in paths)]
+    out = []
+    for key, path, e2e in declared:
+        out += [(key, f) for f in ([os.path.normpath(os.path.join(path, e2e))] if e2e else guess(path))]
+    if not declared:
+        for p in paths or ["."]:
+            out += [(os.path.basename(p) if p != "." else ".", f) for f in guess(p)]
+    return out
+
+
+def id_selectors(body):
+    """[(id, absent)] of a flow's `id:` selectors, block or inline; absent = under assertNotVisible / notVisible."""
+    out, stack = [], []  # (indent of the key, key) of the open YAML keys above the current line
+    for line in body.splitlines():
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(stripped)
+        if stripped.startswith("- "):
+            indent, stripped = indent + 2, stripped[2:].lstrip()
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        key = KEY.match(stripped)
+        absent = any(k in ABSENT for _, k in stack) or bool(key and key.group(1) in ABSENT)
+        value = ID_VALUE.match(stripped)
+        if value:
+            out.append((value.group(1).strip(), absent))
+        out += [(m.group(1).strip(), absent) for m in INLINE_ID.finditer(stripped)]
+        if key:
+            stack.append((indent, key.group(1)))
+    return [(i, a) for i, a in out if i]
+
+
+def maestro_flow(rel, text):
+    head, sep, body = text.partition("\n---")
+    if not sep:
+        if re.search(r"^(flows|executionOrder|includeTags|excludeTags):", text, re.M):
+            return None  # workspace config.yaml, not a flow
+        head, body = "", text
+    tags = []
+    m = re.search(r"^tags:\s*\[([^\]]*)\]", head, re.M)
+    if m:
+        tags = [t.strip().strip("'\"") for t in m.group(1).split(",") if t.strip()]
+    else:
+        m = re.search(r"^tags:\s*\n((?:\s+-\s*.+\n?)+)", head, re.M)
+        if m:
+            tags = [t.strip()[1:].strip().strip("'\"") for t in m.group(1).splitlines() if t.strip()]
+    name = re.search(r"^name:\s*(.+)$", head, re.M)
+    lines = body.splitlines()
+    cmds, text_selectors, credential = collections.Counter(), 0, 0
+    for i, line in enumerate(lines):
+        cm = MAESTRO_CMD.match(line)
+        if not cm:
+            continue
+        cmd, arg = cm.group(1), (cm.group(2) or "").strip()
+        cmds[cmd] += 1
+        if cmd in TAP and arg and not arg.startswith(("{", "$", "&", "*")):
+            text_selectors += 1
+        if cmd == "inputText" and arg and not arg.lstrip("'\"").startswith("${") and CREDENTIAL.search(" ".join(lines[max(0, i - 3):i])):
+            credential += 1
+    text_selectors += len(re.findall(r"^\s+text:\s*\S", body, re.M))
+    selectors = id_selectors(body)
+    labels = [i for i, _ in selectors if re.search(r"\s", i)]  # `id: "Remove photo 2"`: an accessible label, i.e. text
+    text_selectors += len(labels)
+    ids = [(i, absent) for i, absent in selectors if i not in labels]
+    mobile = bool(re.search(r"^appId:", head, re.M))
+    refs = [os.path.normpath(os.path.join(os.path.dirname(rel), r.strip("'\" ")))
+            for r in re.findall(r"(?:runFlow:|file:)\s*([^\s{#]+\.ya?ml)", body)]
+    issues = []
+    if not sum(cmds[c] for c in ASSERTS):
+        issues.append("no_assert")
+    if re.search(r"optional:\s*true", body):
+        issues.append("optional")
+    if cmds["retry"]:
+        issues.append("retry")
+    if re.search(r"^\s+point:", body, re.M):
+        issues.append("point")
+    if text_selectors > len(ids):  # mostly found by what the user reads: breaks on a copy or language change
+        issues.append("text_selectors")
+    if mobile and cmds["launchApp"] and "clearState" not in body:
+        issues.append("no_clear_state")
+    if credential:
+        issues.append("credential_literal")
+    if any(cmds[c] for c in AI):
+        issues.append("ai_assert")
+    if not tags:
+        issues.append("no_tags")
+    return {"file": rel, "name": name.group(1).strip() if name else None, "tags": tags, "steps": sum(cmds.values()),
+            "asserts": sum(cmds[c] for c in ASSERTS), "screenshots": cmds["takeScreenshot"], "ids": ids, "refs": refs,
+            "issues": issues}
+
+
+def spec_file(rel, text):
+    framework = "flutter" if rel.endswith(".dart") else "cypress" if ".cy." in rel or "cypress/" in rel else \
+        "playwright" if "@playwright/test" in text or "page." in text else "detox" if "device." in text else "js"
+    tests = len(re.findall(r"\b(test|it|testWidgets)(\.only|\.skip)?\s*\(", text))
+    expects = len(re.findall(r"\bexpect\(|\.should\(|\bexpectLater\(", text))
+    issues = [name for name, pattern in SPEC_LINT if pattern.search(text)]
+    if tests and not expects:
+        issues.append("no_assert")
+    if framework == "flutter" and "find.text(" in text and "find.byKey(" not in text:
+        issues.append("text_selectors")
+    return {"file": rel, "framework": framework, "tests": tests, "asserts": expects, "issues": issues}
+
+
+def id_splits(ident):
+    """`button-home-recent-0` → (`button-home-recent-`, `0`), (`button-home-`, `recent-0`)… as (head, tail with its
+    separator): how code that builds the id at run time spells the fixed part, `'button-home-recent-$i'` or `'$id-increase'`."""
+    parts = re.split(r"([-_.])", ident)
+    return [("".join(parts[:k * 2]), "".join(parts[k * 2 - 1:])) for k in range(len(parts) // 2, 0, -1)]
+
+
+def stale_ids(root, cfg, surface_path, e2e, used):
+    """Ids the flows use that no tracked client file of the surface holds any more, neither whole nor as the fixed part of
+    an id it builds at run time (`'button-home-recent-$index'`, `` `row-${id}` ``, `"item_" + key`, `'$identifier-increase'`)."""
+    if not used:
+        return []
+    with tempfile.NamedTemporaryFile("w", suffix=".ids", delete=False) as fh:
+        fh.write("\n".join(sorted(used)) + "\n")
+    try:
+        found = set(git(root, "grep", "-h", "-o", "-w", "-F", "-f", fh.name, "--", surface_path, ":(exclude)%s" % e2e).splitlines())
+    finally:
+        os.remove(fh.name)
+    missing = sorted(set(used) - found)
+    heads = {h for i in missing for h, _ in id_splits(i) if len(h) >= 6 and len(re.findall(r"[-_.]", h)) >= 2}  # not `button-`
+    tails = {t for i in missing for _, t in id_splits(i) if len(t) >= 4 and not t.strip("-_.").isdigit()}
+    if not heads and not tails:
+        return missing
+    alternation = lambda parts: "|".join(re.escape(p) for p in sorted(parts, key=len, reverse=True)) or "(?!)"
+    built = re.compile("(?P<head>%s)(?=\\$|\\{|['\"`]\\s*\\+)|(?:\\$\\{?\\w+\\}?|\\}|\\+\\s*['\"`])(?P<tail>%s)(?=['\"`])"
+                       % (alternation(heads), alternation(tails)))
+    seen_heads, seen_tails = set(), set()
+    for rel in tracked(root, [surface_path], cfg):
+        if rel.startswith(e2e + "/") or os.path.splitext(rel)[1].lower() not in LANGS:
+            continue
+        for m in built.finditer(read_text(root, rel) or ""):
+            (seen_heads if m.group("head") else seen_tails).add(m.group("head") or m.group("tail"))
+    return [i for i in missing if not any(h in seen_heads or t in seen_tails for h, t in id_splits(i))]
+
+
+def cmd_flows(a):
+    root, cfg = context()
+    paths = [p.strip("/") or "." for p in a.paths] if a.paths else []
+    files = tracked(root, paths or ["."], cfg)
+    by_path = {k: p for k, p, _ in surfaces(cfg)}
+    report, flows, specs = [], [], []
+    for key, folder in e2e_dirs(cfg, files, paths):
+        inside = [f for f in files if f.startswith(folder + "/")]
+        parsed = []
+        for rel in inside:
+            text = read_text(root, rel)
+            if text is None:
+                continue
+            if rel.endswith((".yaml", ".yml")):
+                flow = maestro_flow(rel, text)
+                if flow:
+                    parsed.append(flow)
+            elif SPEC.search(rel):
+                specs.append(spec_file(rel, text))
+        called = {r for f in parsed for r in f["refs"]}
+        tags, issues = collections.Counter(), collections.defaultdict(list)
+        used, absent_only = collections.defaultdict(list), collections.defaultdict(list)
+        for flow in parsed:
+            flow["subflow"] = flow["file"] in called or bool(SUBFLOW_DIR.search(flow["file"][len(folder):]))
+            if flow["subflow"]:
+                flow["issues"] = [i for i in flow["issues"] if i not in ("no_assert", "no_tags")]
+            for t in flow["tags"]:
+                tags[t] += 1
+            for i in flow["issues"]:
+                issues[i].append(flow["file"])
+            for ident, absent in flow["ids"]:
+                if not re.search(r"[$*\\\[\]()|]", ident):  # a variable or a regex matches what the run builds
+                    (absent_only if absent else used)[ident].append(flow["file"])
+        for ident in [i for i in absent_only if i in used]:
+            used[ident] += absent_only.pop(ident)
+        surface_path = by_path.get(key) or os.path.dirname(folder) or "."
+        stale = stale_ids(root, cfg, surface_path, folder, list(used) + list(absent_only))
+        if parsed:
+            report.append({"surface": key, "dir": folder, "framework": "maestro", "flows": sum(1 for f in parsed if not f["subflow"]),
+                           "subflows": sum(1 for f in parsed if f["subflow"]), "tags": dict(tags.most_common()),
+                           "issues": {k: v[:10] + (["… +%d" % (len(v) - 10)] if len(v) > 10 else []) for k, v in sorted(issues.items())},
+                           "ids": len(used), "stale_ids": [{"id": i, "flows": list(dict.fromkeys(used[i]))[:3]} for i in stale if i in used][:20],
+                           # asserted absent, but no client code defines it: the assert passes whatever the screen shows
+                           "vacuous_ids": [{"id": i, "flows": list(dict.fromkeys(absent_only[i]))[:3]} for i in stale if i in absent_only][:20]})
+        flows += [{k: f[k] for k in ("file", "name", "tags", "steps", "asserts", "screenshots", "issues", "subflow")} for f in parsed]
+    emit({"surfaces": report, "flows": flows[:200], "specs": specs[:100],
+          "note": None if report or specs else "không thấy thư mục e2e — khai surfaces.<key>.e2e_dir hoặc chưa có automation"})
+
+
+# ── findings ────────────────────────────────────────────────────────────────
+
+FINDING = re.compile(r"^## (F\d+)\.\s+(.+?)\s*$", re.M)
+META = re.compile(r"^- (\w+):\s*(.*?)\s*$")
+LENS = re.compile(r"^# audit (qa|arch|product)\b", re.M)
+TYPES = ("Bug", "Improvement", "Feature", "Task")
+SEV = {"cao": 0, "high": 0, "vừa": 1, "medium": 1, "thấp": 2, "low": 2}
+EFFORT = {"S": 0, "M": 1, "L": 2}
+FP = re.compile(r"^(qa|arch|product)(/[a-z0-9][a-z0-9._-]*){2,}$")
+REQUIRED = ("fp", "type", "sev", "effort", "evidence")
+BODY_MAX = 8000
+
+
+def parse_findings(path, platforms):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as err:
+        return [], [{"file": path, "error": str(err)}]
+    head = LENS.search(text)
+    lens = head.group(1) if head else None
+    heads = list(FINDING.finditer(text))
+    out, errors, seen = [], [], set()
+    if not head:
+        errors.append({"file": path, "error": "thiếu dòng đầu `# audit <qa|arch|product> · …`"})
+    for i, m in enumerate(heads):
+        block = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip("\n").split("\n")
+        meta, j = {}, 0
+        while j < len(block) and META.match(block[j]):
+            key, value = META.match(block[j]).groups()
+            meta[key] = value
+            j += 1
+        body = re.split(r"^## ", "\n".join(block[j:]), flags=re.M)[0].strip()  # a later `## …` section belongs to the file
+        fid = "%s:%s" % (lens or "?", m.group(1))
+        problems = ["thiếu `- %s:`" % k for k in REQUIRED if not meta.get(k)]
+        if meta.get("type") and meta["type"] not in TYPES:
+            problems.append("type phải là %s" % " | ".join(TYPES))
+        if meta.get("sev") and meta["sev"].lower() not in SEV:
+            problems.append("sev phải là cao | vừa | thấp")
+        if meta.get("effort") and meta["effort"].upper() not in EFFORT:
+            problems.append("effort phải là S | M | L")
+        fp = meta.get("fp", "")
+        if fp and not FP.match(fp):
+            problems.append("fp `%s` phải là <lens>/<vùng>/<slug>, chữ thường, không số dòng" % fp)
+        elif fp and lens and not fp.startswith(lens + "/"):
+            problems.append("fp `%s` phải bắt đầu bằng `%s/`" % (fp, lens))
+        plats = [p.strip() for p in meta.get("platform", "").split(",") if p.strip()]
+        bad = [p for p in plats if platforms and p not in platforms]
+        if bad:
+            problems.append("platform %s không phải key của labels.platform (%s)" % (",".join(bad), ",".join(platforms)))
+        if "- [ ]" not in body:
+            problems.append("body thiếu tiêu chí nghiệm thu `- [ ]`")
+        if len(body) > BODY_MAX:
+            problems.append("body %d ký tự > %d — rút gọn" % (len(body), BODY_MAX))
+        if "agentflow:state" in body:
+            problems.append("body không được chứa state block")
+        if len(m.group(2)) > 90:
+            problems.append("tiêu đề > 90 ký tự")
+        if fid in seen:
+            problems.append("trùng id %s" % m.group(1))
+        seen.add(fid)
+        if problems:
+            errors.append({"file": path, "id": fid, "error": "; ".join(problems)})
+            continue
+        item = {"id": fid, "lens": lens, "title": m.group(2), "type": meta["type"], "sev": meta["sev"].lower(),
+                "effort": meta["effort"].upper(), "platform": plats, "fp": fp, "evidence": meta["evidence"], "body": body}
+        for key in ("regressed", "score"):
+            if meta.get(key):
+                item[key] = meta[key]
+        out.append(item)
+    if head and not heads:
+        errors.append({"file": path, "error": "không có mục `## F<k>. <tiêu đề>` nào"})
+    return out, errors
+
+
+def score_of(item):
+    try:
+        return float(re.sub(r"[^\d.]", "", item.get("score") or "") or 0)
+    except ValueError:
+        return 0.0
+
+
+def cmd_findings(a):
+    platforms = []
+    root = afconfig.repo_root()
+    if root:
+        try:
+            platforms = list(afconfig.platform_labels(afconfig.load_config(root) or {}))
+        except ValueError:
+            platforms = []
+    items, errors = [], []
+    for path in a.files:
+        found, bad = parse_findings(path, platforms)
+        items += found
+        errors += bad
+    if a.body:
+        hit = next((i for i in items if i["id"] == a.body), None)
+        if not hit:
+            emit({"error": "không có mục %s (đúng dạng: <lens>:F<k>)" % a.body}, 3)
+        print(hit["body"])
+        return
+    merged = {}
+    for item in sorted(items, key=lambda i: SEV[i["sev"]]):
+        kept = merged.get(item["fp"])
+        if kept:
+            kept.setdefault("also", []).append(item["id"])
+            continue
+        merged[item["fp"]] = item
+    ranked = sorted(merged.values(), key=lambda i: (SEV[i["sev"]], 0 if i.get("regressed") else 1, EFFORT[i["effort"]], -score_of(i), i["id"]))
+    counts = collections.Counter(i["sev"] for i in ranked)
+    emit({"count": len(ranked), "by_sev": dict(counts), "by_lens": dict(collections.Counter(i["lens"] for i in ranked)),
+          "findings": [{k: v for k, v in i.items() if k != "body"} for i in ranked], "errors": errors}, 1 if errors else 0)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="agentflow-audit", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("scan", help="radar kiến trúc + chất lượng code")
+    s.add_argument("--days", type=int, default=180, help="cửa sổ lịch sử git cho hotspot/coupling (mặc định 180)")
+    s.add_argument("--top", type=int, default=12, help="số dòng tối đa mỗi danh sách")
+    s.add_argument("--depth", type=int, default=3, help="số tầng thư mục dưới path làm một module (mặc định 3)")
+    s.add_argument("paths", nargs="*")
+    s = sub.add_parser("flows", help="kiểm kê + soát độ vững của automation e2e")
+    s.add_argument("paths", nargs="*")
+    s = sub.add_parser("findings", help="kiểm + gộp file phát hiện của auditor")
+    s.add_argument("files", nargs="+")
+    s.add_argument("--body", help="in body ticket của một mục, vd qa:F2")
+    a = p.parse_args(argv)
+    {"scan": cmd_scan, "flows": cmd_flows, "findings": cmd_findings}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()

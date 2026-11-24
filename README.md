@@ -1,6 +1,6 @@
 # agent-flow-plugin
 
-Marketplace Claude Code chứa plugin [AgentFlow](agentflow/README.md): team agent PO · SA · DEV (kiêm automation test trên staging) tự chạy ticket trên GitHub Projects board tới cổng của con người.
+Marketplace Claude Code chứa plugin [AgentFlow](agentflow/README.md): team agent PO · SA · DEV (kiêm automation test trên staging) tự chạy ticket trên GitHub Projects board tới cổng của con người. `/agentflow:checklist` soát sản phẩm (QA/UX trên staging, kiến trúc + chất lượng code, cố vấn sản phẩm) rồi lên ticket cải tiến có bằng chứng.
 
 ```bash
 claude plugin marketplace add signtoappstore/agent-flow-plugin

@@ -26,7 +26,7 @@ agentflow/evals/run.sh --runs 1 --max-cost-usd 5               # hành vi của 
 | Tầng | File | Kiểm gì |
 |---|---|---|
 | Guard | `tests/test_guard.py`, `tests/test_shellparse.py` | Bảng lệnh chặn/cho qua, role, hook thật |
-| Script | `tests/test_afconfig.py`, `test_board.py`, `test_tools.py` | Parser YAML (đối chiếu PyYAML nếu có), forbidden, API giả, không lộ secret |
+| Script | `tests/test_afconfig.py`, `test_board.py`, `test_tools.py` | Parser YAML (đối chiếu PyYAML nếu có), forbidden, API giả, không lộ secret, radar + lint flow + dạng phát hiện của `agentflow-audit` |
 | Contract | `tests/test_contract.py` | Trần ký tự của prompt, tham chiếu `§`, path `${CLAUDE_PLUGIN_ROOT}`, lệnh `agentflow-board`, frontmatter, stage/label/`[AF:…]` khớp giữa file |
 | E2E | `tests/e2e/run.py` | Nguyên `/agentflow:do` với git thật, hook thật, GitHub giả có trạng thái (schema ghi từ server thật): assert trên kết quả ở GitHub và git. Tốn token |
 | Eval | `evals/` | Agent thật + MCP giả: DoR của SA, review ❌, escalate, hook thật chặn force-push và đọc secret |

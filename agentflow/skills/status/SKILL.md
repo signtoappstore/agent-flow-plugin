@@ -39,7 +39,7 @@ Chờ người: needs-info #… · blocked #… · qc-manual #…
 - Ticket **không** mang `labels.agent` nhưng đang ở `in_progress`…`in_qc` → người làm tay hoặc thiếu label, agent sẽ bỏ qua; muốn agent tiếp quản: `/agentflow:do #n`.
 - Ticket mang `labels.agent` ở `in_progress` không có rework label → DEV run trước có thể đã chết giữa chừng (kể cả lúc chờ pipeline staging); `/agentflow:do #n` sẽ resume.
 - Ticket mang `labels.agent` ở `in_qc` không có `labels.qc_manual` → ticket của luồng cũ; `/agentflow:run` đưa về DEV (*requeue*).
-- `.claude/worktrees/af-*` của issue đã đóng → `/agentflow:run` sẽ dọn, hoặc `git worktree remove`.
+- `.claude/worktrees/af-<n>` của issue đã đóng → `/agentflow:run` sẽ dọn, hoặc `git worktree remove`.
 
 Sạch → `✓ không có bất thường`.
 

@@ -7,6 +7,7 @@ Plugin Claude Code biến một repo GitHub thành **team agent có kỷ luật*
 | **PO** | `/agentflow:task`, ngay trong session của bạn (không subagent) | Expert PO cố vấn bạn viết ticket: vấn đề, bối cảnh, giá trị, người dùng, kết quả đo được, phạm vi, tiêu chí nghiệm thu kiểm được. Không code, không giải pháp kỹ thuật trong ticket |
 | **SA** (Opus) | subagent, ở Ready rồi In Review | Phân tích yêu cầu, chặn ticket chưa đủ, chọn giải pháp tốt nhất và hợp tech stack của repo, **đánh giá rủi ro, lập test case cần kiểm chứng**; sau đó review PR theo thiết kế khi flow đã pass trên staging |
 | **DEV** (Opus) | subagent, ở In Progress | Expert software engineer kiêm automation tester: code theo thiết kế của SA (kiến trúc, SOLID, pattern, clean code), gắn element id, viết flow automation (Maestro trước, **không viết unit/mock test**), merge lên staging; lượt **verify** (context mới) chờ deploy server/web (không chờ release mobile), chạy flow của ticket + danh sách Regression SA chốt, tự sửa tối đa 3 vòng; vẫn fail thì ghi lỗi block lên ticket |
+| **Audit** (Opus) | subagent của `/agentflow:checklist`, một lăng kính mỗi agent, chạy song song | Soát sản phẩm như chuyên gia rồi đề xuất việc có bằng chứng: **qa** (automation mobile/web: hành trình chính, độ phủ + độ vững của flow, chạy trên staging, soi ảnh tìm lỗi UI/UX, bug) · **arch** (kiến trúc, code khó bảo trì/debug/mở rộng) · **product** (cải tiến, tính năng mới, ý tưởng). Chỉ đọc; bạn chọn mục nào thành ticket |
 
 Agent tự chạy ticket trên GitHub Projects board **tới cổng của con người**. Bạn chỉ làm ba việc: **chốt việc** (PO kéo Backlog → Ready, hoặc xác nhận ngay trong `/agentflow:task`), **QC tay** khi cần, và **merge**.
 
@@ -74,6 +75,28 @@ Hai cổng trước khi làm: **tạo task** (`/agentflow:task`) và **implement
 
 DoR vẫn chặn ở cả hai chế độ (thiếu AC, AC mâu thuẫn, Size phải tách, bị chặn, thiếu input không suy ra được).
 
+### Checklist cải tiến: `/agentflow:checklist`
+
+```
+/agentflow:checklist                       # hỏi lăng kính + phạm vi
+/agentflow:checklist qa --focus "thanh toán"
+/agentflow:checklist arch product --max 8
+```
+
+1. Tạo worktree `.claude/worktrees/af-audit` từ `origin/<base>` vừa fetch (`agentflow-base audit`; không đụng checkout của bạn), đọc ≤ 3 issue checklist gần nhất (`Checklist cải tiến …`, bảng Sổ phát hiện) để biết mục nào đã có ticket, mục nào đã đóng mà tái phát.
+2. Mỗi lăng kính một agent **Audit** chạy nền, song song:
+
+| Lăng kính | Soát gì | Bằng chứng |
+|---|---|---|
+| `qa` | Hành trình chính (CUJ) ↔ flow đang có: CUJ chưa phủ, flow chỉ có happy path, flow giòn (id không còn trong code, `optional`/`retry` che lỗi, chọn bằng chữ, thiếu `clearState`, chờ cứng…). Chạy flow CUJ trên staging (web + mobile khi có thiết bị), viết flow thăm dò cho CUJ chưa có flow, chụp từng state rồi soi UI/UX: phản hồi, thông báo lỗi, nhất quán, chữ cắt/tràn, dấu tiếng Việt, màn nhỏ, vùng chạm, nhãn tiếp cận, số bước | `agentflow-audit flows`, flow + bước, log, tên ảnh, `staging @sha`; bug kèm flow tái hiện để DEV dùng lại |
+| `arch` | Hotspot (hay sửa × lớn), phụ thuộc vòng, tầng dưới import tầng trên, file luôn đổi cùng nhau, khối trùng, nuốt lỗi, log/lỗi khó truy, N+1, thiếu phân trang, cấu hình cứng theo môi trường, CI thiếu check — ưu tiên nơi hay đổi | `agentflow-audit scan` + `path:line`; AC đo lại được (vd "cycle a ↔ b không còn") |
+| `product` | Vòng giá trị, ma sát trong CUJ, niềm tin, tiếp cận, đo lường còn thiếu, việc vận hành làm tay; ý tưởng ba tầm (quick win · cải tiến · đặt cược) có JTBD, giả thuyết, RICE, Kano, bản nhỏ nhất | issue của người dùng, màn, tracking, nguồn web; con số đề xuất để PO chốt |
+
+3. `agentflow-audit findings` kiểm đúng dạng, gộp trùng, xếp theo mức độ → tái phát → công sức → RICE; bạn chọn mục (chế độ `clarify.task: auto`: tự lấy mục cao + vừa).
+4. Ticket tạo ở **Backlog** dưới issue cha `Checklist cải tiến <ngày>` (bảng **Sổ phát hiện** giữ mọi mục, cả mục chỉ ghi nhận). Muốn làm ngay: lệnh hỏi chuyển Ready qua `/agentflow:task #n` (cổng Ready như mọi ticket), rồi `/agentflow:do` hoặc `/agentflow:run`.
+
+Audit chỉ đọc repo và GitHub (hook chặn ghi, push, đổi git, workflow; ghi nháp chỉ trong `af-audit` hoặc `/tmp`). Trên staging nó không thanh toán/gửi thật, dữ liệu tự tạo có tiền tố `af-audit-` và được dọn; lượt chạy flow dùng `--issue 0` nên không lẫn với ticket, nhưng vẫn chờ thiết bị nếu DEV đang dùng. Chi phí: ba agent Opus, qa lâu nhất (build app, chạy flow, ≤ 30 ảnh).
+
 ## Yêu cầu
 
 | Thứ | Ghi chú |
@@ -123,6 +146,7 @@ claude plugin enable  agentflow@agent-flow-plugins --scope local
 | `/agentflow:task <mô tả>` | **PO**: expert PO cố vấn tới khi ticket đủ — vấn đề → giá trị và đo thành công → người dùng → phạm vi → AC → luật nghiệp vụ, trường hợp biên; nắm sản phẩm qua tài liệu thiết kế (`design.repo`, đọc đúng mục), Figma, ảnh, tìm issue trùng, **không đọc code**; mọi ý trong ticket do PO nói hoặc xác nhận, viết bằng ngôn ngữ sản phẩm, chỉ dẫn tài liệu khi cần; PO nói bằng giải pháp thì đổi thành nhu cầu. Chấm chất lượng (vấn đề, giá trị, AC kiểm được, đường lỗi, phạm vi, không giải pháp kỹ thuật, cỡ) trước khi ghi vào **Backlog**. Đạt cổng Ready (AC kiểm được, Priority, Size, label nền tảng, assignee, milestone nếu repo có) thì hỏi PO chuyển **Ready**, rồi hỏi chạy `/agentflow:do`. Việc lớn hay nhiều việc: hỏi PO chọn 1 ticket, issue cha + sub-issue (tách theo lát giá trị) hay ticket độc lập (chế độ auto: tự chọn theo cùng dấu hiệu). `#n` = hoàn thiện issue ở Backlog, hoặc ở Ready khi DEV chưa nhận (kể cả needs-info) |
 | `/agentflow:do #n` | Xử lý **một** ticket qua SA design → DEV (code + flow, deploy staging, chạy flow, tự sửa) → SA review, tới cổng của người |
 | `/agentflow:run` | Chạy **cả hàng đợi**: việc dở trước (feedback → QC người fail → review → rework), rồi Ready theo Priority (DEV nhận việc đã thiết kế trước khi SA thiết kế việc mới); `--only sa` để SA thiết kế trước cả hàng Ready; song song `run.parallel` ticket; dừng khi hết việc hoặc đủ `run.max_tasks`. Chạy định kỳ: `/loop 30m /agentflow:run` |
+| `/agentflow:checklist [qa] [arch] [product]` | **Checklist cải tiến sản phẩm**: các agent Audit soát song song, gộp thành checklist có bằng chứng và mức độ (cao · vừa · thấp), bạn chọn mục → ticket ở **Backlog** (body đủ bước tái hiện / bằng chứng / AC, Priority + Size gợi ý theo mức độ và công sức) gom dưới một issue checklist cha; lần sau nhớ mục đã có ticket, báo mục đã đóng mà tái phát. `--focus "<luồng/màn/thư mục>"` soi hẹp, `--surface <key>`, `--max N` |
 | `/agentflow:status` | Đếm theo stage, việc chờ người, bất thường. `--metrics`: cycle time, first-pass yield, số lần fail, aging + thống kê journal |
 | `/agentflow:doctor` | Kiểm config, token/scope, board mapping, label, MCP, hook, Figma, Telegram — chỉ cách sửa từng lỗi |
 | `/agentflow:learn [bài học]` | Gom journal + bài học → diff nhỏ vào source plugin → bạn duyệt → bump version → validate → phát hành |
@@ -132,6 +156,8 @@ claude plugin enable  agentflow@agent-flow-plugins --scope local
 | Thành phần | Vai trò |
 |---|---|
 | `agents/sa.md` · `dev.md` | Hai subagent Opus (model đổi qua `run.models`): SA effort xhigh, DEV effort high. SA `MODE=design`: DoR + thiết kế (`[AF:SA] design`: giải pháp, rủi ro, test case `e2e`/`api`/`tay`), `MODE=review`: soát theo thiết kế + file rủi ro + flow + Kiểm chứng lại, ✅ thì giao QC người hoặc undraft. DEV code theo thiết kế, viết + chạy flow trên staging, ghi "Lệch thiết kế", bảng AC → code → TC → flow, Kiểm chứng lại vào PR |
+| `agents/audit.md` | Subagent Opus của `/agentflow:checklist`, effort high: một lăng kính mỗi lượt (`LENS=qa\|arch\|product`), mỗi phát hiện có bằng chứng, `fp` ổn định giữa các lần chạy, body ticket viết sẵn; kết thúc `RESULT: audit · …` |
+| `references/audit-qa.md` · `audit-arch.md` · `audit-product.md` | Chuẩn chuyên gia của từng lăng kính, agent Audit chỉ đọc file của lăng kính mình (qa đọc thêm `automation.md`, arch đọc thêm `engineering.md`) |
 | `references/engineering.md` | Chuẩn kỹ thuật chung của SA và DEV: kiến trúc theo tầng của repo, SOLID, pattern khi cần, KISS/YAGNI/DRY, bảo mật, hiệu năng, test, tự review |
 | `bin/agentflow-style` | Soát dòng code mới: hàm thân biểu thức (`=>`), điều kiện `&&`/`||`, ternary bị formatter bẻ dòng. DEV phải sạch trước khi push, SA ❌ mỗi chỗ còn lại. Viết vừa một dòng thì vẫn được; `CLAUDE.md` của repo nói khác thì theo `CLAUDE.md` |
 | `references/protocol.md` | Contract chung: stage, label, board call, state block, comment `[AF:…]`, thứ tự ghi, git, token hygiene, journal |
@@ -139,11 +165,12 @@ claude plugin enable  agentflow@agent-flow-plugins --scope local
 | `references/design.md` | Figma / design trong repo — chỉ load khi ticket chạm UI |
 | `references/clarify.md` | Làm rõ yêu cầu auto · ask: `/agentflow:task`, orchestrator và SA design chỉ đọc khi cần (task luôn đọc; implement chỉ ở chế độ ask) |
 | `references/automation.md` | Test case từ yêu cầu + rủi ro, quy ước element id theo nền tảng, cách viết flow (Maestro trước, mobile và web, thao tác như người dùng), chọn flow liên quan, chạy trên staging, phân định fail, ảnh chỉ khi cần, mục Kiểm chứng lại — DEV đọc khi có test case e2e/api |
-| `skills/*` | 7 lệnh (`disable-model-invocation` — không tốn context khi không gọi) |
-| `hooks/hooks.json` + `scripts/guard.py` · `shellparse.py` | Hook chặn (best-effort, xem §Chạy không cần bạn), kể cả qua lệnh bọc (`bash -c`, `env`, `timeout`, `$(…)`, `xargs`, `eval`, code Python/Node): merge/approve PR, dispatch/rerun/cancel workflow ngoài `agentflow-board` (chỉ staging, workflow khai báo; SA không được), force-push, xoá nhánh remote, xoá repo/package, push nhánh protected/base, đọc/sửa/in path `forbidden`, token trong tham số. Thêm luật theo role: SA chỉ đọc (không sửa file, không push, không đổi git); DEV chỉ ghi trong worktree `af-<n>` và worktree staging `af-<n>-staging`, không tạo/gắn nhánh local (`switch`, `checkout -b`, `worktree add -b`), push staging chỉ từ worktree staging và worktree đó chỉ push vào staging, không đưa staging vào nhánh ticket (merge, reset, restore, push `origin/staging:<nhánh>`), không `update-ref`/`read-tree`/`git branch` ghi, không `pull` ngoài worktree, không undraft |
-| `scripts/result-check.py` | Hook `SubagentStop`: subagent phải kết thúc bằng khối `RESULT` |
+| `skills/*` | 8 lệnh (`disable-model-invocation` — không tốn context khi không gọi) |
+| `hooks/hooks.json` + `scripts/guard.py` · `shellparse.py` | Hook chặn (best-effort, xem §Chạy không cần bạn), kể cả qua lệnh bọc (`bash -c`, `env`, `timeout`, `$(…)`, `xargs`, `eval`, code Python/Node): merge/approve PR, dispatch/rerun/cancel workflow ngoài `agentflow-board` (chỉ staging, workflow khai báo; SA không được), force-push, xoá nhánh remote, xoá repo/package, push nhánh protected/base, đọc/sửa/in path `forbidden`, token trong tham số. Thêm luật theo role: SA chỉ đọc (không sửa file, không push, không đổi git); Audit chỉ đọc như SA, thêm: không ghi gì lên GitHub (MCP chỉ `get_*`/`list_*`/`search_*`/`*_read`, `gh` chỉ list/view, board chỉ đọc), ghi nháp chỉ trong `af-audit` hoặc ngoài repo; DEV chỉ ghi trong worktree `af-<n>` và worktree staging `af-<n>-staging`, không tạo/gắn nhánh local (`switch`, `checkout -b`, `worktree add -b`), push staging chỉ từ worktree staging và worktree đó chỉ push vào staging, không đưa staging vào nhánh ticket (merge, reset, restore, push `origin/staging:<nhánh>`), không `update-ref`/`read-tree`/`git branch` ghi, không `pull` ngoài worktree, không undraft |
+| `scripts/result-check.py` | Hook `SubagentStop`: subagent phải kết thúc bằng khối `RESULT` (Audit: stage `audit`) |
 | `bin/agentflow-board` | Setup + chẩn đoán qua GraphQL (Status option, field, view, label, issue type, doctor, metrics) + đọc check pipeline staging + gom góp ý của người trên PR (`feedback`) + milestone mở cho `/agentflow:task` (`milestones`) + workflow trên staging (`dispatch`, `rerun`, `cancel`) + chuyển field Platform sang label (`platform-migrate`) |
-| `bin/agentflow-base` | Worktree ticket tính từ remote base: `worktree <n> --branch B` (tạo/cập nhật worktree ticket detached từ `origin/B` hoặc `origin/<base>` vừa fetch, việc chưa bắt đầu thì dời lên base mới, giữ phần dở, fast-forward/merge khi có người push vào nhánh, từ chối bỏ việc chưa push của nhánh khác, init submodule) · `clean` (orchestrator dọn worktree, không bao giờ xoá commit chưa push) |
+| `bin/agentflow-audit` | Bằng chứng rẻ, lặp lại được cho Audit: `scan` (radar kiến trúc: kích thước, file lớn, hotspot commit × dòng, cặp file đổi cùng nhau khác thư mục, vòng phụ thuộc + cạnh nên cắt, import ngược tầng, khối trùng, TODO, smell) · `flows` (kiểm kê + soát độ vững flow Maestro và spec Playwright/Cypress/Flutter, id flow dùng mà code không còn) · `findings` (kiểm dạng + gộp + xếp file phát hiện, `--body` in body ticket). Không đọc path `forbidden` |
+| `bin/agentflow-base` | Worktree ticket tính từ remote base: `worktree <n> --branch B` (tạo/cập nhật worktree ticket detached từ `origin/B` hoặc `origin/<base>` vừa fetch, việc chưa bắt đầu thì dời lên base mới, giữ phần dở, fast-forward/merge khi có người push vào nhánh, từ chối bỏ việc chưa push của nhánh khác, init submodule) · `clean` (orchestrator dọn worktree, không bao giờ xoá commit chưa push) · `audit` (worktree `af-audit` cho `/agentflow:checklist`, đặt lại về `origin/<base>` mỗi lần, giữ deps đã cài) |
 | `bin/agentflow-e2e` | `select`: flow có sẵn cần chạy lại cho một thay đổi + lý do (SA lúc thiết kế, DEV khi diff lệch thiết kế) · `run`: chạy flow Maestro tách khỏi shell của agent (lặp, nhiều thiết bị, `--env-file` không lộ giá trị; `--install` build + cài app khi thiết bị chưa có đúng bản; mỗi thiết bị một ticket một lúc, lượt sau báo `queued`) · `wait`: chờ ≤ 160 giây rồi in một dòng JSON (flow fail + bước + log), `--log` cho build chạy tách |
 | `bin/agentflow-journal` · `agentflow-notify` · `agentflow-settings` | Journal tự học (`~/.claude/agentflow/journal.jsonl`) · ping Telegram · sửa settings local và chạy lệnh với `env` của nó, không lộ secret |
 | `scripts/mcp-headers.py` | `headersHelper` cấp token cho GitHub MCP lúc connect |

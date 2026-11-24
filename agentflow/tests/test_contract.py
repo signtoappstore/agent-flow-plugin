@@ -34,18 +34,24 @@ import afconfig  # noqa: E402
 # dispatch.md +0.1k: slots fill only when agents run in the background (a foreground spawn holds the orchestrator until it
 # ends). tests/e2e/run.py --scenario multi, 2 runs on 2026-11-24: Claude Code backgrounded 10/11 and 9/9 spawns by itself and
 # #44 was spawned as soon as #43 came back while #42 still ran; the flag keeps it so where the default differs.
+# 3.9 (/agentflow:checklist) adds files no ticket spawn reads: the command, the audit agent and one reference per lens,
+# read only when a person asks for an audit. SA and DEV spawns cost the same as before.
 BUDGETS = {
     "agents/sa.md": 10100, "agents/dev.md": 13000,
     "references/protocol.md": 13000, "references/dispatch.md": 9100, "references/design.md": 2600, "references/automation.md": 7100,
     "references/engineering.md": 3000, "references/clarify.md": 6650,
     "skills/init/SKILL.md": 11200, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 2800, "skills/doctor/SKILL.md": 2000,
     "skills/run/SKILL.md": 2400, "skills/status/SKILL.md": 2850, "skills/task/SKILL.md": 9850, "skills/init/references/board-setup.md": 5550,
+    "agents/audit.md": 4400, "references/audit-qa.md": 4800, "references/audit-arch.md": 3750, "references/audit-product.md": 2850,
+    "skills/checklist/SKILL.md": 6050,
 }
 # What a spawn reads before it looks at the ticket: its prompt, the protocol and the references it always reads.
 # 2.x DEV paid 9.3k + 12.1k + 8.3k (it read the reviewer prompt to self-review); the shared engineering.md replaced that.
 # 3.0 happy path: SA design + DEV + SA review ≈ 24k + 33.4k + 24k, where the QC plan + verify spawns cost 2 × 27.7k more.
-SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"]}
-PER_SPAWN_LIMIT = {"sa": 26050, "dev": 35750}
+# The auditor reads one lens a spawn: qa (its reference + automation.md) is the costliest.
+SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"],
+               "audit": ["references/audit-qa.md", "references/automation.md"]}
+PER_SPAWN_LIMIT = {"sa": 26050, "dev": 35750, "audit": 29150}
 DESCRIPTION_LIMIT = 700
 
 
@@ -80,8 +86,9 @@ def headings(rel):
 
 
 TEMPLATE = afconfig.parse_yaml(read("agentflow.yaml"))
-AGENTS = ["sa", "dev"]
-SKILLS = ["do", "doctor", "init", "learn", "run", "status", "task"]
+AGENTS = ["sa", "dev", "audit"]
+SKILLS = ["checklist", "do", "doctor", "init", "learn", "run", "status", "task"]
+LENSES = ["qa", "arch", "product"]
 
 
 class Budget(unittest.TestCase):
@@ -133,6 +140,7 @@ class Frontmatter(unittest.TestCase):
         tools = {n: frontmatter("agents/%s.md" % n)["tools"] for n in AGENTS}
         self.assertNotRegex(tools["sa"], r"\b(Write|Edit)\b")  # SA reads and reviews; DEV deploys and resolves staging conflicts
         self.assertRegex(tools["dev"], r"\bEdit\b")
+        self.assertNotRegex(tools["audit"], r"\bEdit\b")  # writes its findings file and scratch flows whole; the guard keeps it out of the repo
         for name in AGENTS:
             self.assertNotIn("mcp__claude-in-chrome__*", tools[name])
 
@@ -281,6 +289,29 @@ class References(unittest.TestCase):
                         self.assertIn(sub.group(0), subs)
                         for flag in re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", rest.split("`", 1)[0]):
                             self.assertIn('"%s"' % flag, source)
+
+    def test_audit_subcommands_and_flags_exist(self):
+        source = read("bin/agentflow-audit")
+        subs = set(re.findall(r'add_parser\("([\w-]+)"', source))
+        for rel in all_docs():
+            for line in read(rel).splitlines():
+                for rest in line.split("agentflow-audit ")[1:]:
+                    sub = re.match(r"[a-z]+", rest)
+                    if not sub:
+                        continue
+                    with self.subTest("%s: %s" % (rel, rest[:40])):
+                        self.assertIn(sub.group(0), subs)
+                        for flag in re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", rest.split("`", 1)[0]):
+                            self.assertIn('"%s"' % flag, source)
+
+    def test_every_lens_has_its_reference(self):
+        agent, command = read("agents/audit.md"), read("skills/checklist/SKILL.md")
+        for lens in LENSES:
+            with self.subTest(lens):
+                self.assertIn("${CLAUDE_PLUGIN_ROOT}/references/audit-%s.md" % lens, agent)
+                self.assertIn("`%s`" % lens, command)
+        findings = read("bin/agentflow-audit")
+        self.assertIn("(%s)" % "|".join(LENSES), findings)  # lens of a finding's fp and of the file's first line
 
     def test_tool_subcommands_exist(self):
         settings, journal = read("bin/agentflow-settings"), read("bin/agentflow-journal")
@@ -432,6 +463,22 @@ class StateMachine(unittest.TestCase):
         ("references/automation.md", r"`run --install`.*`queued` = DEV khác đang dùng", "một thiết bị một ticket một lúc"),
         ("references/automation.md", r"Head staging đổi so với lúc bắt đầu chạy.*không tính vòng", "ticket khác deploy giữa chừng không thành vòng sửa/blocked"),
         ("references/engineering.md", r"Đổi state/vòng đời của một luồng ⇒ liệt kê mọi lối vào/ra", "tự review bắt lỗi sót lối vào/ra (review ❌ hay gặp nhất)"),
+        # 3.9: /agentflow:checklist — experts find evidence, the person picks, tickets land in Backlog
+        ("skills/checklist/SKILL.md", r"không đưa ticket ra khỏi Backlog khi người chưa xác nhận", "checklist không tự đưa việc vào pipeline"),
+        ("skills/checklist/SKILL.md", r"Không assign, không ghi Status nào khác `backlog`", "ticket của checklist chờ PO chốt"),
+        ("skills/checklist/SKILL.md", r"\*\*ask\*\*: AskUserQuestion \"Lên ticket cho mục nào", "ask: người chọn mục trước khi tạo ticket"),
+        ("skills/checklist/SKILL.md", r"Sổ phát hiện", "lần sau nhớ mục đã có, báo tái phát (GitHub là nơi duy nhất giữ trạng thái)"),
+        ("skills/checklist/SKILL.md", r"\*\*không nuốt lỗi\*\*", "ghi lỗi giữa chừng thì dừng và báo"),
+        ("skills/checklist/SKILL.md", r"run_in_background=true", "các lăng kính chạy song song"),
+        ("agents/audit.md", r"\*\*Bằng chứng trước kết luận\*\*", "không phát hiện nào không có bằng chứng"),
+        ("agents/audit.md", r"`agentflow-audit findings <OUT>`: exit 0", "file phát hiện đúng dạng trước khi trả về"),
+        ("agents/audit.md", r"không thao tác không hoàn tác được trên staging", "audit không làm hỏng dữ liệu staging"),
+        ("references/audit-qa.md", r"`--issue 0` = audit", "lượt chạy của audit tách khỏi ticket"),
+        ("references/audit-qa.md", r"≤ 30 ảnh mỗi lượt", "soi ảnh có trần token"),
+        ("references/audit-qa.md", r"có thể do ticket đang làm", "lỗi của ticket chưa merge không thành bug của sản phẩm"),
+        ("references/audit-arch.md", r"Số đo chỉ nói \*\*chỗ cần đọc\*\*", "radar không thay cho đọc code"),
+        ("references/audit-product.md", r"không gửi tên khách hàng, code, dữ liệu nội bộ", "WebSearch không lộ dữ liệu của repo"),
+        ("references/audit-product.md", r"`Chưa rõ: <câu hỏi> \(đề xuất", "PO chốt con số agent đề xuất"),
     ]
 
     def test_rules_still_stated(self):
@@ -575,6 +622,12 @@ class SharedFacts(unittest.TestCase):
                         continue
                     with self.subTest("%s: [AF:%s] %s" % (rel, role, event)):
                         self.assertIn((role, event), known)
+
+    def test_audit_never_writes_github(self):
+        tools = frontmatter("agents/audit.md")["tools"]
+        self.assertIn("mcp__plugin_agentflow_github__*", tools)  # reads issues for the product lens
+        self.assertIn('"audit"', read("scripts/guard.py"))  # … and the guard keeps it to reads
+        self.assertNotRegex(read("agents/audit.md"), r"\b(issue_write|add_issue_comment|projects_write)\b")
 
     def test_every_role_prefix_used_by_its_agent(self):
         self.assertIn("[AF:DEV]", read("agents/dev.md"))

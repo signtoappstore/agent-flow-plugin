@@ -10,6 +10,8 @@ of forbidden (secret) paths, no secret value in a tool call.
 Role rules apply inside an agentflow subagent, read from `agent_type` of the hook payload: SA reads and reviews, changes
 no file and pushes nothing; DEV writes only in its worktree `af-<n>` and its staging worktree `af-<n>-staging`, pushes
 staging only from that staging worktree and nothing else from it, never merges staging into its branch, never undrafts.
+Audit (/agentflow:checklist) reads like the SA, writes scratch only in its worktree `af-audit` or outside the repo, and
+changes nothing on GitHub: the checklist files tickets after the person picks them.
 
 Active only for paths inside a repo that has agentflow.yaml at its root. Commands are parsed, wrappers and nested
 scripts unwrapped; what cannot be read statically (a script written and run later, `make deploy`, decoded payloads)
@@ -148,6 +150,12 @@ def block(reason):
 
 
 ROLE_ALIASES = {"reviewer": "sa"}  # 2.x name of the SA
+READ_ONLY = ("sa", "audit")  # roles that change no git ref, push nothing and run no workflow
+ROLE_NAME = {"sa": "SA", "audit": "Audit", "dev": "DEV"}
+# What the auditor may call: reads only. A list of reads, not of writes, so a tool the server adds later stays closed.
+AUDIT_MCP_READ = re.compile(r"^(get|list|search)_|_(read|get|list)$|^(get_me|whoami|create_session)$")
+AUDIT_BOARD_READ = {"whoami", "inspect", "items", "milestones", "metrics", "checks", "repo"}
+AUDIT_GH_READ = {"list", "view", "status", "diff", "checks"}
 
 
 def role_of(data):
@@ -224,6 +232,8 @@ class Session:
             return "subagent không sửa/xoá `agentflow.yaml`."
         if self.role == "sa":
             return "SA chỉ review, không sửa file trong repo (`%s`)." % path
+        if self.role == "audit" and not re.search(AUDIT_TREE, resolved):
+            return "Audit chỉ ghi nháp trong worktree audit `.claude/worktrees/af-audit/` hoặc `/tmp` (`%s`)." % path
         if self.role == "dev" and not re.search(DEV_TREE, resolved):
             return "DEV không sửa file ngoài worktree của mình (`%s`)." % path
         return None
@@ -237,6 +247,7 @@ class Session:
 
 DEV_TREE = r"/\.claude/worktrees/af-\d+(-staging)?(/|$)"
 STAGING_TREE = r"/\.claude/worktrees/af-\d+-staging(/|$)"
+AUDIT_TREE = r"/\.claude/worktrees/af-audit(/|$)"
 BRANCH_WRITERS = {"-d", "-D", "--delete", "-f", "--force", "-m", "-M", "--move", "-c", "-C", "--copy", "-u", "--set-upstream-to",
                   "--unset-upstream", "-t", "--track", "--edit-description"}
 BRANCH_LISTERS = {"-l", "--list", "-a", "--all", "-r", "--remotes", "--contains", "--no-contains", "--merged", "--no-merged",
@@ -337,8 +348,8 @@ def check_push(args, workdir, known, session, scope):
     for t in push_targets(args, current, known):
         if t in scope.protected:
             block("push thẳng vào nhánh protected `%s` bị cấm — mở PR từ nhánh làm việc." % t)
-        if session.role == "sa":
-            block("SA chỉ review, không push — DEV deploy lên `%s`." % scope.staging)
+        if session.role in READ_ONLY:
+            block("%s chỉ đọc, không push — DEV deploy lên `%s`." % (ROLE_NAME[session.role], scope.staging))
         staging_tree = known and session.in_staging_worktree(workdir)
         if session.role == "dev" and t == scope.staging and not staging_tree:
             block("DEV push `%s` chỉ từ worktree staging: `git -C <repo>/.claude/worktrees/af-<n>-staging push origin HEAD:%s`." % (t, t))
@@ -513,8 +524,8 @@ def check_git(argv, session):
             if session.secret_path(path):
                 block("`%s` là path forbidden (secret) — không đọc qua git, không stage." % path)
     changes = sub in GIT_CHANGERS and not read_only_form(sub, args)
-    if session.role == "sa" and (changes or branch_write(sub, args) or sub in ("pull", "checkout", "switch", "worktree", "read-tree")):
-        block("SA chỉ đọc git (`fetch`, `diff`, `show`, `grep`, `log`) — không `git %s`." % sub)
+    if session.role in READ_ONLY and (changes or branch_write(sub, args) or sub in ("pull", "checkout", "switch", "worktree", "read-tree")):
+        block("%s chỉ đọc git (`fetch`, `diff`, `show`, `grep`, `log`) — không `git %s`." % (ROLE_NAME[session.role], sub))
     if session.role == "dev" and (sub in ("update-ref", "read-tree") or branch_write(sub, args)):
         block("DEV không `git %s` — đổi nhánh bằng commit/merge trong worktree, không tạo nhánh local." % sub)
     if session.role == "dev" and local_branch(sub, args, workdir, known):
@@ -633,8 +644,10 @@ def check_gh(args, session, scope, cmd):
         block(MSG_APPROVE)
     if head == ["pr", "checkout"] and session.role:
         block("subagent không `gh pr checkout` — lệnh này đổi nhánh của checkout chính; dùng worktree.")
-    if head == ["pr", "update-branch"] and session.role == "sa":
-        block("SA chỉ review — không đổi head của PR.")
+    if head == ["pr", "update-branch"] and session.role in READ_ONLY:
+        block("%s chỉ đọc — không đổi head của PR." % ROLE_NAME[session.role])
+    if session.role == "audit" and head[:1] not in (["api"], ["search"]) and head != ["auth", "status"] and head[1:2] and head[1] not in AUDIT_GH_READ:
+        block("Audit chỉ đọc GitHub (`gh … list|view|status|diff|checks`, `gh search`, `gh api` GET) — ticket do /agentflow:checklist tạo sau khi người chọn.")
     if head == ["pr", "ready"] and session.role == "dev" and "--undo" not in args:
         block(MSG_UNDRAFT)
     if head == ["pr", "create"] and session.role == "dev" and "--draft" not in args and "-d" not in args:
@@ -651,8 +664,8 @@ def check_gh(args, session, scope, cmd):
         block(MSG_TOKEN)
     if head[:1] == ["api"]:
         method = http_method(args[1:], ("-X", "--method"), ("-f", "-F", "--field", "--raw-field", "--input"))
-        if session.role == "sa" and method != "GET":
-            block("SA chỉ đọc qua `gh api` (GET); verdict, comment, label đi qua GitHub MCP.")
+        if session.role in READ_ONLY and method != "GET":
+            block("%s chỉ đọc qua `gh api` (GET); ghi lên GitHub đi qua GitHub MCP của vai được ghi." % ROLE_NAME[session.role])
         endpoint = " ".join(gh_positionals(args[1:], GH_API_VALUE_FLAGS))
         check_api(endpoint, " ".join(args[1:]) + " " + gh_stdin_text(args, cmd, session), method, scope)
     if session.hard_only:
@@ -930,16 +943,20 @@ def check_settings_tool(args, session):
 
 def check_base_tool(args, session):
     sub = next((a for a in args if not a.startswith("-")), "")
-    if sub == "worktree" and session.role == "sa":
-        block("SA chỉ đọc code ở origin/<ref> (`git show`, `git grep`, `git diff`) — không tạo worktree.")
+    if sub == "worktree" and session.role in READ_ONLY:
+        block("%s chỉ đọc code ở origin/<ref> hoặc worktree audit — không tạo worktree ticket." % ROLE_NAME[session.role])
+    if sub == "audit" and session.role:
+        block("worktree audit do /agentflow:checklist tạo (`agentflow-base audit`) trước khi spawn.")
     if sub == "clean" and session.role:
         block("worktree của ticket do orchestrator dọn (`agentflow-base clean`).")
 
 
 def check_board_tool(args, session):
     sub = next((a for a in args if not a.startswith("-")), "")
-    if sub in ("dispatch", "rerun", "cancel") and session.role == "sa":
-        block("SA chỉ review — DEV chạy workflow trên staging.")
+    if sub in ("dispatch", "rerun", "cancel") and session.role in READ_ONLY:
+        block("%s chỉ đọc — DEV chạy workflow trên staging." % ROLE_NAME[session.role])
+    if session.role == "audit" and sub and sub not in AUDIT_BOARD_READ:
+        block("Audit chỉ đọc board (`agentflow-board %s`)." % "|".join(sorted(AUDIT_BOARD_READ)))
     if sub == "platform-migrate" and session.role:
         block("subagent không chuyển dữ liệu board — `/agentflow:init` làm, người duyệt.")
 
@@ -1171,18 +1188,20 @@ def check_mcp(tool, ti, session):
             if isinstance(ti.get(key), str):
                 check_bash(ti[key], session)
     role = session.role
+    if role == "audit" and low.startswith("mcp__") and not AUDIT_MCP_READ.search(low.rsplit("__", 1)[-1]):
+        block("Audit chỉ đọc (`get_*`, `list_*`, `search_*`, `*_read`) — /agentflow:checklist tạo ticket sau khi người chọn.")
     if any(k in low for k in ("create_or_update_file", "push_files", "delete_file")):
-        if role == "sa":
-            block("SA không ghi file lên GitHub.")
+        if role in READ_ONLY:
+            block("%s không ghi file lên GitHub." % ROLE_NAME[role])
         branch = ti.get("branch")
         scope = session.scope(session.cwd)
         if scope and (not branch or branch in scope.protected or branch == scope.staging):
             block("ghi file thẳng lên nhánh protected `%s` qua MCP bị cấm." % (branch or "default branch"))
-    if "update_pull_request_branch" in low and role == "sa":
-        block("SA chỉ review — không đổi head của PR.")
+    if "update_pull_request_branch" in low and role in READ_ONLY:
+        block("%s chỉ đọc — không đổi head của PR." % ROLE_NAME[role])
     if "update_pull_request" in low and "branch" not in low and ti.get("draft") is False and role == "dev":
         block(MSG_UNDRAFT)
-    if "create_pull_request" in low and role == "sa":
+    if "create_pull_request" in low and role in READ_ONLY:
         block("chỉ DEV mở PR.")
     if "create_pull_request" in low and role == "dev" and ti.get("draft") is not True:
         block(MSG_DRAFT)

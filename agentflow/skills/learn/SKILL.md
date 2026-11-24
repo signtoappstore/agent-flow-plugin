@@ -17,7 +17,7 @@ SUB=$(jq -r '.plugins[]|select(.name=="agentflow").source' "$ROOT/.claude-plugin
 SRC="$ROOT/${SUB#./}"; test -f "$SRC/.claude-plugin/plugin.json" && echo "SRC=$SRC" || echo "NO_SOURCE"
 ```
 
-`NO_SOURCE` (marketplace dạng github, máy không giữ source) → **dừng**: đề nghị mở issue/PR trên repo của plugin, kèm bài học đã soạn. Version cache ≠ version source → báo một dòng (lần release này ship cả backlog).
+`NO_SOURCE` (marketplace dạng github, máy không giữ source) → **dừng**: đề nghị mở issue/PR trên repo plugin, kèm bài học đã soạn. Version cache ≠ version source → báo một dòng (lần release này ship cả backlog).
 
 `--release` → bỏ qua §1–§5, nhảy §6 từ bước 2 (không có diff mới để áp, version đã bump).
 
@@ -52,13 +52,14 @@ Gộp entry cùng gốc thành **≤ 5 bài học**, mỗi bài một dòng: `ag
 | Hàng đợi, thứ tự, model, song song, guard, SYS transition | `references/dispatch.md` |
 | Figma | `references/design.md` |
 | Hành vi một lệnh | `skills/<lệnh>/SKILL.md` |
-| Lệnh nguy hiểm lọt qua / chặn nhầm | `scripts/guard.py`, `scripts/shellparse.py` (+ case trong `tests/test_guard.py`) |
+| Soát của `/checklist` | `agents/audit.md`, `references/audit-*.md` |
+| Lệnh nguy hiểm lọt qua / chặn nhầm | `scripts/guard.py`, `scripts/shellparse.py` |
 | Setup / chẩn đoán board | `bin/agentflow-board`, `skills/init/…` |
-| Vì sao thiết kế như vậy | `DESIGN-NOTES.md` (không phải file runtime) |
+| Vì sao thiết kế như vậy | `DESIGN-NOTES.md` |
 
 ## 5. Soạn diff — ngân sách token là luật
 
-- Đọc file đích trước. Sửa **ít nhất có thể**: một dòng, một mục list, sửa một câu. Đã có ý tương tự → làm rõ câu đó, không thêm câu mới.
+- Đọc file đích trước. Sửa **ít nhất có thể**: một dòng, một mục list, một câu. Đã có ý tương tự → làm rõ câu đó, không thêm câu mới.
 - Mỗi dòng thêm vào `agents/*`, `references/*`, `skills/*` bị trả giá ở **mọi** lần chạy. Trần theo **ký tự** nằm ở `tests/test_contract.py` (`BUDGETS`), không theo dòng vì một dòng có thể dài vài trăm ký tự. Vượt → phải gộp/xoá câu khác trong cùng lượt, không nâng trần.
 - Dòng chỉ giải thích *vì sao* → `DESIGN-NOTES.md`; file runtime chỉ giữ mệnh lệnh.
 - Một fact một chỗ: `grep -rn` trước khi thêm.
