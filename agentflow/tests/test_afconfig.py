@@ -165,6 +165,18 @@ jobs:
         cfg["staging"]["workflows"] = []
         self.assertFalse(afconfig.staging_skip_ci(cfg), "không khai workflow ⇒ CI tự chạy khi push là đường deploy")
 
+    def test_release_paths_keep_what_the_staging_release_builds(self):
+        cfg = {"surfaces": {"backend": {"path": "backend/"}, "web": {"path": "web", "e2e_dir": ".maestro"},
+                            "mobile": {"path": "mobile/", "e2e_dir": ".maestro", "install": "flutter build"}, "ci": {"path": ".github/"}}}
+        paths = ["backend/services/a.ts", "web/src/page.tsx", "web/.maestro/af-7-tc1.yaml", "mobile/lib/main.dart",
+                 "mobile/.maestro/x.yaml", ".github/workflows/staging.yml", "secret/staging/seed.json", "CLAUDE.md",
+                 "web/CLAUDE.md", ".claude/skills/x/SKILL.md", "agentflow.yaml", "web/.maestrox/y.yaml"]
+        self.assertEqual(afconfig.release_paths(cfg, paths), ["backend/services/a.ts", "web/src/page.tsx", ".github/workflows/staging.yml",
+                                                              "secret/staging/seed.json", "web/.maestrox/y.yaml"])
+        self.assertEqual(afconfig.release_paths({}, ["src/app.ts", "README.md"]), ["src/app.ts"], "repo một khối: mọi code phải build")
+        nested = {"surfaces": {"app": {"path": ".", "install": "x"}, "api": {"path": "server"}}}
+        self.assertEqual(afconfig.release_paths(nested, ["server/a.go", "lib/b.dart"]), ["server/a.go"], "surface sâu nhất quyết")
+
     def test_keys_of_earlier_versions_still_read_and_named_for_removal(self):
         cfg = filled_config()
         cfg["staging"].update(skip_ci=False, timeout_min=30, build="TestFlight", skip_checks=["Distribute*"],

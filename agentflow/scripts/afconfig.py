@@ -334,6 +334,35 @@ def staging_skip_ci(cfg):
     return bool(staging_workflows(cfg))
 
 
+NO_RELEASE = re.compile(r"(^|/)[^/]+\.md$|^\.claude/|^agentflow\.yaml$")  # docs and agent config: nothing runs them
+
+
+def _dir_prefix(path):
+    path = os.path.normpath(str(path or ".")).replace("\\", "/")
+    return "" if path == "." else path.rstrip("/") + "/"
+
+
+def release_paths(cfg, paths):
+    """The paths of `paths` a staging release has to build. Left out: docs and agent config, a surface with `install` (an app
+    the DEV builds on the device) and a surface's e2e_dir (flows run from the checkout). A path outside every surface
+    counts: seed data, deploy config. The deepest surface whose path holds the file decides."""
+    surfaces = []
+    for surface in ((cfg or {}).get("surfaces") or {}).values():
+        if isinstance(surface, dict):
+            root = _dir_prefix(surface.get("path"))
+            e2e = _dir_prefix(os.path.join(root, str(surface["e2e_dir"]))) if surface.get("e2e_dir") else None
+            surfaces.append((root, bool(surface.get("install")), e2e))
+    surfaces.sort(key=lambda s: -len(s[0]))
+    out = []
+    for path in paths:
+        if NO_RELEASE.search(path):
+            continue
+        _, install, e2e = next((s for s in surfaces if path.startswith(s[0])), ("", False, None))
+        if not install and not (e2e and path.startswith(e2e)):
+            out.append(path)
+    return out
+
+
 WIPE_INPUT = re.compile(r"wipe|drop|purge|truncate|erase|reset|xoá|xóa", re.I)
 
 

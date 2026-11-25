@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """bin/agentflow-board against a fake GitHub: no network, no token."""
 
+import base64
 import contextlib
 import datetime as dt
 import importlib.machinery
@@ -739,6 +740,54 @@ jobs: {}
         self.assertEqual(code, 0, out)
         self.assertEqual([r["run"] for r in json.loads(out)["cancelled"]], [1])  # 2 built the apps, 3 is a QC build, 4 a person's
         self.assertEqual([u.rsplit("/", 2)[-2] for u, _ in self.posts() if u.endswith("/cancel")], ["1"])
+
+    def deploys(self, *runs, files=(), status="ahead"):
+        self.gh.on("GET", "/actions/workflows/deploy-staging.yml/runs", {"workflow_runs": list(runs)})
+        self.gh.on("GET", "/compare/", {"status": status, "files": [{"filename": f} for f in files]})
+        self.gh.on("POST", "/dispatches", {}, status=204)
+
+    def test_a_plain_deploy_is_skipped_when_the_last_deploy_holds_every_change_it_builds(self):
+        with open(os.path.join(self.repo, "agentflow.yaml"), "a") as fh:
+            fh.write('surfaces:\n  web: {path: web/, e2e_dir: .maestro}\n  mobile: {path: mobile/, e2e_dir: .maestro, install: "flutter build"}\n')
+        old = "b" * 40
+        self.deploys(self.run_(1, conclusion="success", sha=old), files=["web/.maestro/af-7-tc1.yaml", "mobile/lib/a.dart", "docs/x.md"])
+        code, out = self.run_cmd("dispatch", "acme/app")
+        self.assertEqual(code, 0, out)
+        res = json.loads(out)
+        self.assertEqual((res["dispatched"], res["deployed"], res["sha"]), ([], old, SHA))
+        self.assertEqual(self.posts(), [])
+        self.assertIn("/compare/%s...%s" % (old, SHA), [u for m, u, d in self.gh.calls if "/compare/" in u][0])
+
+    def test_a_plain_deploy_runs_when_staging_may_not_hold_the_change(self):
+        old, qc = "b" * 40, self.dispatch_run(2, "deploy-staging.yml", self.stamp(-60))
+        board._mark("acme/app", "deploy-staging.yml", "qc", self.stamp(-62), 5, ["apps"])
+        cases = {"code to build": ([self.run_(1, conclusion="success", sha=old)], ["web/src/page.tsx"], "ahead"),
+                 "newest run failed": ([self.run_(1, sha=old)], [], "ahead"),
+                 "newest run still going": ([self.run_(1, status="in_progress", conclusion=None, sha=old)], [], "ahead"),
+                 "another branch deployed last": ([self.run_(1, branch="master", conclusion="success", sha=old)], [], "ahead"),
+                 "staging rewritten": ([self.run_(1, conclusion="success", sha=old)], [], "diverged"),
+                 "never deployed": ([], [], "ahead"),
+                 "QC build aside, code to build": ([qc, self.run_(1, conclusion="success", sha=old)], ["backend/a.ts"], "ahead")}
+        for why, (runs, files, status) in cases.items():
+            with self.subTest(why):
+                self.gh.routes.clear()
+                self.gh.on("GET", "/commits/staging", {"sha": SHA})
+                self.gh.on("GET", "/contents/.github/workflows/deploy-staging.yml", {"content": base64.b64encode(self.DEPLOY.encode()).decode()})
+                self.deploys(*runs, files=files, status=status)
+                before = len(self.dispatches())
+                code, out = self.run_cmd("dispatch", "acme/app")
+                self.assertEqual(code, 0, out)
+                self.assertEqual(len(self.dispatches()), before + 1, out)
+                self.assertNotIn("deployed", json.loads(out))
+
+    def test_boxes_qc_and_force_always_dispatch(self):
+        self.deploys(self.run_(1, conclusion="success"))
+        self.state_body("apps")
+        for argv in (["--on", "backend"], ["--force"], ["--qc", "--issue", "7"]):
+            with self.subTest(argv):
+                before = len(self.dispatches())
+                code, out = self.run_cmd("dispatch", "acme/app", *argv)
+                self.assertEqual((code, len(self.dispatches())), (0, before + 1), out)
 
     def test_qc_build_turns_on_what_dev_marked_for_the_ticket(self):
         self.gh.on("POST", "/dispatches", {}, status=204)

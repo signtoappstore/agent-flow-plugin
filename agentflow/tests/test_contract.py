@@ -44,6 +44,9 @@ import afconfig  # noqa: E402
 # ticket enters In QC) adds ~0.55k to the protocol, ~0.4k to SA, ~0.6k to the orchestrator, ~0.15k to DEV: superseding,
 # toggles and Status of sub-issues live in agentflow-board (tested code), the prompts only call it. A ticket that needs no
 # new server/web skips the deploy, and N sub-issues cost one DEV/SA/QC chain instead of N.
+# 3.12 (deploy only what staging lacks, decided by agentflow-board; the app for a person's QC only for an item that needs it,
+# one platform when one is enough; SA settles the staging data; never the whole suite) keeps every budget: the deploy rule
+# moved into tested code and the prompts were trimmed by what they gained.
 BUDGETS = {
     "agents/sa.md": 10500, "agents/dev.md": 13200,
     "references/protocol.md": 13550, "references/dispatch.md": 9750, "references/design.md": 2600, "references/automation.md": 7100,
@@ -381,7 +384,7 @@ class StateMachine(unittest.TestCase):
         ("agents/dev.md", r"agentflow-style origin/<base>`", "DEV soát biểu thức bị bẻ dòng"),
         ("agents/sa.md", r"agentflow-style origin/<base> origin/<branch>", "SA soát biểu thức bị bẻ dòng"),
         ("references/automation.md", r"\*\*Maestro trước\*\*", "Maestro là lựa chọn đầu cho mobile và web"),
-        ("references/automation.md", r"Không dùng `assertWithAI`", "không gửi ảnh staging ra AI ngoài"),
+        ("references/automation.md", r"Không dùng lệnh `\*WithAI`", "không gửi ảnh staging ra AI ngoài"),
         ("agents/dev.md", r"\*\*Tự review trước khi push\*\*", "DEV tự review, tìm nơi gọi"),
         ("agents/dev.md", r"bảng AC \(AC → file chính → TC → flow\)", "PR có bảng AC cho SA"),
         ("agents/sa.md", r"`BEHIND` .*không phải lỗi", "chậm base không trả PR về DEV"),
@@ -424,14 +427,16 @@ class StateMachine(unittest.TestCase):
         ("agents/dev.md", r"--wait 2\.5", "chờ pipeline dưới 180 giây, vẫn trong TTL của prompt cache"),
         ("agents/dev.md", r"--wait 2\.5` \(không chờ bản build QC\)", "không chờ release mobile của bản QC"),
         ("agents/dev.md", r'merge --no-ff --no-edit -m "af: deploy <branch> \[skip ci\]"', "push staging không tự chạy CI"),
-        ("agents/dev.md", r"Ô build app mobile chỉ khi task cần app build trên CI", "mặc định không build CI mobile, agent bật khi task cần"),
-        ("agents/dev.md", r"Ô `wipe` \(xoá dữ liệu, kèm `--issue <n>`\).*exit 5.*dispatch không wipe", "wipe bị từ chối thì không xoá dữ liệu người khác"),
+        ("agents/dev.md", r"không bật ô build app \(flow mobile dùng bản build trên máy, QC người: `qc_release`", "flow của DEV không chờ build app trên CI"),
+        ("agents/dev.md", r"Ô `wipe` \(kèm `--issue <n>`\).*exit 5.*dispatch không wipe", "wipe bị từ chối thì không xoá dữ liệu người khác"),
+        ("agents/dev.md", r"Ô `wipe`.*theo mục Dữ liệu staging của thiết kế.*chỉ ở lần deploy đầu của lượt", "wipe theo SA, không lặp ở vòng sửa"),
         ("agents/dev.md", r"Tối đa `run.max_test_rounds` vòng", "vòng sửa test có trần"),
         ("agents/dev.md", r"\*\*Lỗi block\*\*.*`\[AF:DEV\] blocked`", "hết vòng thì ghi lỗi block lên issue"),
         ("agents/dev.md", r"gắn `blocked`, giữ `in_progress`, mention `people.po`", "lỗi block báo PO"),
         ("agents/dev.md", r"không viết unit/integration test có mock", "plugin không viết mock test"),
         ("agents/dev.md", r"`test_sha: <head>`", "DEV ghi head đã test cho SA"),
-        ("references/automation.md", r"\*\*Chọn flow liên quan\*\*", "chỉ chạy flow liên quan, không cả suite"),
+        ("references/automation.md", r"\*\*Chọn flow liên quan\*\*.*Không chạy cả suite\.", "chỉ chạy flow liên quan, không cả suite"),
+        ("agents/sa.md", r"Không chọn cả suite", "regression không bao giờ là cả suite"),
         # 3.5 (người dùng chọn 2026-11-14): SA chốt regression, flow mới 1 + 2 lần, DEV tách lượt verify
         ("agents/sa.md", r"\*\*Regression\*\* — flow có sẵn DEV chạy lại.*≤ `run.max_regression`", "SA chốt flow regression có trần"),
         ("agents/sa.md", r"`only: web` \(chỉ chạm backend\) ⇒ chỉ flow web", "diff chỉ chạm backend thì regression chỉ trên web"),
@@ -471,7 +476,7 @@ class StateMachine(unittest.TestCase):
         ("skills/run/SKILL.md", r"dừng ⇒ slot trống, lấp ngay, không chờ agent khác xong", "slot trống không chờ cả lô xong"),
         ("references/dispatch.md", r"run_in_background=<true khi parallel > 1>", "song song thật: spawn thường chặn orchestrator tới khi xong"),
         ("references/dispatch.md", r"slot trống thì lấp ngay", "song song theo slot, không theo lô"),
-        ("references/automation.md", r"`run --install`.*`queued` = DEV khác đang dùng", "một thiết bị một ticket một lúc"),
+        ("references/automation.md", r"`run --install`.*`queued` = DEV khác đang giữ thiết bị", "một thiết bị một ticket một lúc"),
         ("references/automation.md", r"Head staging đổi so với lúc bắt đầu chạy.*không tính vòng", "ticket khác deploy giữa chừng không thành vòng sửa/blocked"),
         ("references/engineering.md", r"Đổi state/vòng đời của một luồng ⇒ liệt kê mọi lối vào/ra", "tự review bắt lỗi sót lối vào/ra (review ❌ hay gặp nhất)"),
         # 3.9: /agentflow:checklist — experts find evidence, the person picks, tickets land in Backlog
@@ -495,8 +500,14 @@ class StateMachine(unittest.TestCase):
         ("references/dispatch.md", r"agentflow-board group-sync <owner/repo> --issue <n>", "Status của sub theo cha"),
         ("references/dispatch.md", r"SA trả `in_qc · waiting_human` ⇒ SYS \*qc-build\*", "bản app cho QC người chỉ khi ticket sang In QC"),
         ("references/dispatch.md", r"\*qc-build\*.*--qc --issue <n>", "orchestrator phát bản QC theo qc_release DEV ghi"),
-        ("agents/dev.md", r"agentflow-board workflows <REPO>.*dispatch <REPO> --on <ô cần bật>", "DEV đọc ô của workflow rồi tự quyết theo task"),
-        ("agents/dev.md", r"`qc_release: <ô cần bật cho bản cài QC tay", "DEV quyết bản cài cho QC tay"),
+        ("agents/dev.md", r"agentflow-board dispatch <REPO>`.*tự bỏ qua.*`agentflow-board workflows <REPO>`.*`--on <ô>`", "DEV đọc ô của workflow rồi tự quyết theo task"),
+        ("agents/dev.md", r"`qc_release: <ô \| —>` \(`automation.md` §Kiểm chứng lại\)", "DEV quyết bản cài cho QC tay"),
+        # 3.12: deploy only what staging lacks, app for a person's QC only when an item needs the app, never the whole suite
+        ("agents/dev.md", r"khối §7 \(không có gì phải build ⇒ không deploy\)", "vòng sửa không deploy lại khi chỉ đổi flow, app, doc"),
+        ("references/automation.md", r"\*\*Bản cài cho QC\*\*.*thiết bị thật.*chỉ nền tảng đó\. Còn lại `—`", "bản app cho QC chỉ khi có mục phải làm trên app"),
+        ("references/automation.md", r"ghi nơi test: web · app `<nền tảng>`", "case tay ghi nơi test"),
+        ("agents/sa.md", r"\*\*Dữ liệu staging\*\*: giữ, hoặc wipe", "SA chốt có xoá dữ liệu staging không"),
+        ("agents/sa.md", r"`qc_release` lệch mục QC tay", "SA soát bản cài QC DEV chọn"),
         ("agents/dev.md", r"`stalled` ⇒ `\[AF:DEV\] blocked`", "dispatch không chạy gì thì báo người, không chờ mãi"),
         ("agents/dev.md", r"\*\*Chờ deploy\*\* khi state `deploy_wait` ≠ `false`", "lượt verify không chờ pipeline không có"),
         ("agents/sa.md", r"nhóm: `group: <sub gộp>`", "SA chốt tập sub của nhóm"),

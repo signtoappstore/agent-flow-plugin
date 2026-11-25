@@ -62,7 +62,8 @@ git:
 #     test: "pnpm test"
 #     e2e: ""                  # tuỳ chọn — lệnh chạy cả suite e2e nhắm vào staging, có env STAGING_URL, vd "BASE_URL=$STAGING_URL pnpm e2e"
 #     e2e_dir: ""              # tuỳ chọn — thư mục test e2e trong surface, vd ".maestro" (Maestro, ưu tiên cho UI) hoặc "e2e": DEV commit flow vào đây
-#     install: ""              # mobile, tuỳ chọn — build + cài bản trỏ server staging lên emulator/simulator đang chạy,
+#     install: ""              # mobile, tuỳ chọn — build + cài bản trỏ server staging lên emulator/simulator đang chạy
+#                              # (surface có install không cần deploy staging để chạy flow),
 #                              # vd "flutter build apk --flavor staging && adb install -r build/app/outputs/flutter-apk/app-staging-release.apk"
 
 # ── E2E MAP (tuỳ chọn) ───────────────────────────────────────────────────────
@@ -86,7 +87,9 @@ staging:
   url: ""                      # web/API staging cho flow web, test API. Trống ⇒ các case đó thành mục QC tay
   notes: ""                    # secret folder có app id, tài khoản test (gitignored), vd "secret/staging/"
   workflows: []                # workflow agent được chạy trên staging (workflow_dispatch), vd [staging.yml]. Agent đọc ô
-                               # (input boolean + mô tả) của workflow, tự chọn theo task: build gì, có xoá dữ liệu không
+                               # (input boolean + mô tả) của workflow, tự chọn theo task: build app cho QC tay, có xoá dữ liệu không.
+                               # Dispatch không ô nào tự bỏ qua khi bản deploy cuối đã có mọi thay đổi phải build (ngoài doc,
+                               # e2e_dir và surface có `install`)
 
 # ── LÀM RÕ YÊU CẦU ───────────────────────────────────────────────────────────
 # auto = agent tự phân tích, chọn phương án tốt nhất và hợp nhất, ghi quyết định + căn cứ để người soát sau.

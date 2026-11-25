@@ -26,10 +26,13 @@ Auth: the token `gh` uses ($GH_TOKEN, $GITHUB_TOKEN, else `gh auth token`). Neve
   checks <owner/repo> --branch B --contains SHA [--since ISO] [--wait MIN] [--skip GLOB]   CI of the branch head; one JSON line
                                             (queued: its run waits behind another run of its concurrency group)
   workflows <owner/repo>                    the boolean inputs of each staging.workflows entry, with their descriptions
-  dispatch <owner/repo> [--on IN,..] [--workflow FILE] [--qc] [--issue N]
+  dispatch <owner/repo> [--on IN,..] [--workflow FILE] [--qc] [--issue N] [--force]
                                             run a workflow of staging.workflows on staging.branch: the inputs of --on true,
-                                            every other boolean input false. An older unfinished deploy of the same workflow
-                                            dispatched here that turned on no more is cancelled. --qc: the build for a
+                                            every other boolean input false. Without --on (and --force) nothing runs when the
+                                            last deploy already holds every change of the staging head it must build
+                                            (afconfig.release_paths): `dispatched: []` + `deployed`. An older unfinished
+                                            deploy of the same workflow dispatched here that turned on no more is
+                                            cancelled. --qc: the build for a
                                             person's QC (inputs = state qc_release), kept from cancel. An input that wipes
                                             staging data needs --issue, refused (exit 5) while another ticket is In QC or
                                             runs flows on this machine
@@ -863,6 +866,30 @@ def _supersede(slug, branch, head, workflow, on):
     return done
 
 
+COMPARE_FILES_MAX = 300  # GitHub lists at most this many files of a comparison
+
+
+def _deployed(slug, branch, head, cfg, workflow):
+    """Head of the last deploy by `workflow` when the staging `head` brings nothing a release must build since, else None.
+    Only the newest run of the workflow counts, QC builds dispatched here aside (they leave the stack as it was and run
+    long): a newer run still going, failed, cancelled or of another branch leaves what staging runs unknown."""
+    try:
+        runs = http("GET", "/repos/%s/actions/workflows/%s/runs?per_page=20" % (slug, urllib.parse.quote(workflow, safe="")))
+        last = next((r for r in runs.get("workflow_runs") or [] if _run_kind(slug, r) != "qc"), None)
+        if not last or last.get("head_branch") != branch or (last.get("status"), last.get("conclusion")) != ("completed", "success"):
+            return None
+        if last.get("head_sha") == head:
+            return head
+        diff = http("GET", "/repos/%s/compare/%s...%s" % (slug, last["head_sha"], head))
+    except (RuntimeError, KeyError):
+        return None
+    files = diff.get("files") or []
+    if diff.get("status") not in ("ahead", "identical") or len(files) >= COMPARE_FILES_MAX:
+        return None
+    paths = [p for f in files for p in (f.get("filename"), f.get("previous_filename")) if p]
+    return None if afconfig.release_paths(cfg, paths) else last["head_sha"]
+
+
 def cmd_workflows(a):
     """The boolean inputs ("ô") of each declared staging workflow, with what each one does: what the agent picks from."""
     cfg, branch = _staging_scope(a)
@@ -900,6 +927,11 @@ def cmd_dispatch(a):
             sys.exit(5)
     head = _staging_head(a.slug, branch)
     out = {"dispatched": [], "ref": branch, "sha": head}
+    deployed = None if a.qc or on or a.force else _deployed(a.slug, branch, head, cfg, wf["file"])
+    if deployed:
+        out.update(deployed=deployed, why="bản deploy @%s đã có mọi thay đổi phải build — flow chạy luôn, không chờ" % deployed[:7])
+        print(json.dumps(out, ensure_ascii=False))
+        return
     if not a.qc:
         try:
             cancelled = _supersede(a.slug, branch, head, wf["file"], on)
@@ -1553,6 +1585,7 @@ def main():
     s.add_argument("--on", help="ô (input boolean) cần bật, vd backend,web — ô boolean còn lại gửi false")
     s.add_argument("--qc", action="store_true", help="bản build cho QC người (orchestrator, ticket sang In QC): --on mặc định = state qc_release")
     s.add_argument("--issue", type=int, help="ticket đang deploy (bắt buộc khi bật ô xoá dữ liệu, và với --qc)")
+    s.add_argument("--force", action="store_true", help="chạy cả khi bản deploy cuối đã có mọi thay đổi phải build")
     for name in ("rerun", "cancel"):
         s = sub.add_parser(name); s.add_argument("slug"); s.add_argument("--run", type=int, help="id run trên nhánh staging")
     s = sub.add_parser("group"); s.add_argument("slug"); s.add_argument("--issue", type=int, action="append", required=True)
