@@ -19,7 +19,7 @@ Prompt có: `REPO`, `ISSUE: #<n>`, `ITEM_ID`, `MODE` (`new` · `rework` · `resu
 ## 1. Đọc
 
 - `agentflow.yaml` (schema gate).
-- `issue_read method=get` → body, type/label, assignee, state block. `issue_read method=get_comments` → `[AF:SA] design` mới nhất (giải pháp, rủi ro, test case), verdict mới nhất mỗi role, comment của người sau đó (protocol §5).
+- `issue_read method=get` → body, type/label, assignee, state block. `issue_read method=get_comments` → `[AF:SA] design` mới nhất (giải pháp, rủi ro, test case), verdict mới nhất mỗi role, comment của người sau đó (protocol §5). Nhóm (state `group`): thêm body + comment của người ở mỗi sub.
 - `agentflow-board feedback <REPO> --issue <n>` → `pr`, `branch` (của state block, không có thì của PR mở duy nhất link tới issue, kể cả PR người mở) + góp ý của người trên PR: `pending` (thread chưa trả lời, Request changes), `notes` (review, comment sau `fb`). Có `prs` = nhiều PR mở ⇒ `needs_info` hỏi PR nào. Lệnh lỗi ⇒ đọc `pull_request_read` `get_review_comments`, `get_reviews`, `get_comments`, lọc theo protocol §5.
 - Surface bị chạm: theo thiết kế, label `labels.platform` ↔ `surfaces.<key>.platform`. Không có `surfaces` ⇒ toàn repo.
 
@@ -54,7 +54,7 @@ Ghi start (chỉ `new`/`resume`; `resume` đã có `[AF:DEV] start` ⇒ bỏ): s
 
 - Commit theo `git.commit` (Conventional Commits, `{surface}` = key surface; bỏ `({surface})` nếu không thuộc surface nào). Commit nhỏ, đúng một ý.
 - Commit đầu tiên ⇒ push + mở draft PR ngay (checkpoint), sau đó push sau mỗi bước lớn. `git -C "$WT" push origin HEAD:refs/heads/<branch>`, không bao giờ force. Bị reject ⇒ chạy lại `agentflow-base worktree`, push lại.
-- **Chưa có PR** ⇒ `create_pull_request` **`draft=true`**, base=`<base>`, head=branch, title theo `git.commit` (squash merge sẽ dùng title này). Body theo `.github/pull_request_template.md` nếu repo có; luôn có: `<git.link> #<n>`, Thay đổi, Giải pháp (theo thiết kế SA, link comment), Lệch thiết kế (không có thì `—`), checklist AC, bảng AC (AC → file chính → TC → flow), Test tự động (flow → TC, kết quả trên staging), Kiểm chứng lại (`automation.md` §Kiểm chứng lại), `Design: … @ …` nếu có UI, surface đã chạy check.
+- **Chưa có PR** ⇒ `create_pull_request` **`draft=true`**, base=`<base>`, head=branch, title theo `git.commit` (squash merge sẽ dùng title này). Body theo `.github/pull_request_template.md` nếu repo có; luôn có: `<git.link> #<n>` (protocol §8), Thay đổi, Giải pháp (theo thiết kế SA, link comment), Lệch thiết kế (không có thì `—`), checklist AC, bảng AC (AC → file chính → TC → flow), Test tự động (flow → TC, kết quả trên staging), Kiểm chứng lại (`automation.md` §Kiểm chứng lại), `Design: … @ …` nếu có UI, surface đã chạy check.
 - **Đã có PR** ⇒ push; PR chưa draft (người mở) ⇒ `update_pull_request draft=true`. Mọi thread `pending`: `add_reply_to_pull_request_comment` (`commentId` = `reply_to`) `[AF:DEV] fixed @<sha>` + sửa gì, hoặc `[AF:DEV] reply` + lý do giữ / câu trả lời, mention người góp ý; không resolve. Rồi comment PR `[AF:DEV] fixed @<sha>` (không đổi code: `[AF:DEV] reply`) liệt kê từng mục verdict, Request changes, `notes`: sửa gì / giữ vì sao. Mô tả PR lệch code ⇒ `update_pull_request body`.
 
 ## 7. Deploy staging + chạy flow
@@ -66,19 +66,18 @@ WT=<path của §3>-staging
 git fetch -q origin <staging.branch> <branch>
 git worktree remove --force "$WT" 2>/dev/null || true
 git worktree add -q --detach "$WT" origin/<staging.branch>
-git -C "$WT" merge --no-ff --no-edit -m "af: deploy <branch> [skip ci]" origin/<branch> || { echo MERGE_CONFLICT; exit 0; }   # skip_ci: false / không có when: push ⇒ bỏ [skip ci]; MERGE_CONFLICT ⇒ giữ $WT
+git -C "$WT" merge --no-ff --no-edit -m "af: deploy <branch> [skip ci]" origin/<branch> || { echo MERGE_CONFLICT; exit 0; }   # staging.workflows không release gì ⇒ bỏ [skip ci]; MERGE_CONFLICT ⇒ giữ $WT
 git -C "$WT" push origin HEAD:<staging.branch>   # bị reject ⇒ chạy lại cả khối (tối đa 3 lần)
 git -C "$WT" rev-parse HEAD                      # = deploy_sha
 git worktree remove --force "$WT"
 ```
 
 - **Conflict**: giải trong `$WT` giữ đúng ý cả hai phía (không xoá code của ticket khác), `git add`, `git commit --no-edit`, chạy tiếp từ bước push. Không chắc ⇒ `git merge --abort`, dọn worktree, `[AF:DEV] blocked` + file + nhánh ticket liên quan. Không bao giờ merge staging vào nhánh ticket.
-- Push xong ⇒ state (chỉ sửa) `deploy_sha`, `deploy_at: <ISO-8601 UTC bây giờ>`. `Already up to date` (staging đã có nhánh) ⇒ giữ hai key cũ.
-- **Workflow staging** — tự làm, không hỏi, chỉ qua `agentflow-board` (hook chặn lối khác): push xong ⇒ `agentflow-board cancel <REPO>` (run cũ), rồi `agentflow-board dispatch <REPO> --workflow <file>` cho mỗi mục `staging.workflows` có `when: push`. `when: need` ⇒ khi cần, ghi workflow + lý do ở `[AF:DEV]` kế. Không dispatch build/distribute mobile.
-- **Wipe** (mục có `wipe`): thêm `--wipe --issue <n>` khi migration không hợp dữ liệu cũ, seed đổi, hay dữ liệu bẩn ngoài `af-<n>-` làm flow sai — không che lỗi; lý do ở `[AF:DEV]` kế. Exit 5 (ticket khác đang dùng staging) ⇒ dispatch thường; buộc wipe ⇒ `[AF:DEV] blocked`.
+- **Release staging** — bạn quyết theo task, chỉ qua `agentflow-board` (hook chặn lối khác): push xong (cả `Already up to date`) mà flow sắp chạy cần bản server/web mới (diff từ `test_sha`, thiếu: cả PR) ⇒ `agentflow-board workflows <REPO>` (ô = input boolean + mô tả) rồi `agentflow-board dispatch <REPO> --on <ô cần bật>` (ô khác tắt; nhiều workflow: `--workflow <file>`). Ô build app mobile chỉ khi task cần app build trên CI (thiết bị thật) — flow mobile dùng bản build trên máy. Ô `wipe` (xoá dữ liệu, kèm `--issue <n>`) khi migration không hợp dữ liệu cũ, seed đổi, hay dữ liệu bẩn ngoài `af-<n>-` làm flow sai — không che lỗi; exit 5 (ticket khác đang dùng staging) ⇒ dispatch không wipe, buộc wipe ⇒ `[AF:DEV] blocked`. Bật app, wipe ⇒ lý do ở `[AF:DEV]` kế.
+- Rồi state (chỉ sửa) `deploy_wait` (`false` = không dispatch mà `staging.workflows` có), `deploy_sha`, `deploy_at: <ISO-8601 UTC bây giờ>` (`Already up to date` ⇒ giữ hai key sau).
 - **Tách lượt**: `MODE` `new`/`rework`, push staging xong và còn flow phải chạy ⇒ state (chỉ sửa) `next: DEV verify trên staging`, `RESULT: in_progress · verify`, dừng — lượt `MODE=verify` làm tiếp. Không có flow ⇒ §8 luôn.
-- **Chờ deploy** khi có pipeline (đã dispatch hay không [skip ci]), diff `<test_sha>..origin/<branch>` (thiếu `test_sha`: cả PR) chạm code server/web, kể cả khi merge `Already up to date`; chỉ `e2e_dir` hay mobile ⇒ không chờ:
-  `agentflow-board checks <REPO> --branch <staging.branch> --contains <deploy_sha> --since <deploy_at> --wait 2.5` + `--skip '<glob>'` cho mỗi mục `staging.skip_checks`, Bash `timeout: 170000` (protocol §9); lặp tới khi hết `pending`; mobile: build + cài trong lúc chờ (`automation.md` §Chạy). `contains: false` ⇒ người reset staging: deploy lại. Chờ quá `staging.timeout_min` trong lượt này ⇒ `[AF:DEV] blocked` pipeline-timeout + sha.
+- **Chờ deploy** khi state `deploy_wait` ≠ `false`, kể cả khi merge `Already up to date`:
+  `agentflow-board checks <REPO> --branch <staging.branch> --contains <deploy_sha> --since <deploy_at> --wait 2.5` (không chờ bản build QC), Bash `timeout: 170000` (protocol §9); lặp tới khi hết `pending`; mobile: build + cài trong lúc chờ (`automation.md` §Chạy). `contains: false` ⇒ người reset staging: deploy lại. `queued` (xếp hàng sau run khác) ⇒ chờ tiếp; `stalled` ⇒ `[AF:DEV] blocked` pipeline-timeout + sha.
   `failure` ⇒ log: `actions_list method=list_workflow_runs` theo head → `get_job_logs failed_only=true return_content=true tail_lines=200`. Do diff của ticket ⇒ sửa (tính một vòng); do ticket khác (`git log origin/<base>..origin/<staging.branch> --merges --oneline`) hoặc không xác định ⇒ `[AF:DEV] blocked` + check + đoạn log; do hạ tầng/flaky (runner, mạng, tải deps) ⇒ `agentflow-board rerun <REPO>` rồi chờ lại, không tính vòng (≤ 2 lần mỗi run, quá thì `skipped` ⇒ blocked như trên).
 - **Chạy flow liên quan** trên staging theo `automation.md` §Chạy (mobile: bản build trỏ staging trên emulator).
 
@@ -99,7 +98,7 @@ Mọi `[AF:DEV] blocked` (môi trường, pipeline, conflict, lỗi block): PR g
 
 ## 8. Handoff → `in_review`
 
-Mọi flow liên quan pass trên head PR (`automation.md` §Chạy). PR body: Test tự động + Kiểm chứng lại khớp lần chạy cuối. Theo protocol §6: state — chỉ sửa `stage: in_review`, `pr`, `branch`, `test_sha: <head>`, `next: Review PR #<m>`, `fb` (của feedback, nếu có); comment issue `[AF:DEV] pr #<m> @<sha>` (rework: `[AF:DEV] fixed @<sha>`, không đổi code: `[AF:DEV] reply`): `staging @<deploy_sha>`, `<k>/<k> TC pass`, số mục QC tay; không đụng label; Status → `in_review` (expected `in_progress`). Friction ⇒ journal (sửa theo góp ý của người ⇒ `human_feedback`).
+Mọi flow liên quan pass trên head PR (`automation.md` §Chạy). PR body: Test tự động + Kiểm chứng lại khớp lần chạy cuối. Theo protocol §6: state — chỉ sửa `stage: in_review`, `pr`, `branch`, `test_sha: <head>`, `next: Review PR #<m>`, `fb` (của feedback, nếu có), `qc_release: <ô cần bật cho bản cài QC tay, vd mobile | —>`; comment issue `[AF:DEV] pr #<m> @<sha>` (rework: `[AF:DEV] fixed @<sha>`, không đổi code: `[AF:DEV] reply`): `staging @<deploy_sha>`, `<k>/<k> TC pass`, số mục QC tay; không đụng label; Status → `in_review` (expected `in_progress`). Friction ⇒ journal (sửa theo góp ý của người ⇒ `human_feedback`).
 
 Kết thúc bằng khối `RESULT` (protocol §13).
 

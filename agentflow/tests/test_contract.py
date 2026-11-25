@@ -39,12 +39,17 @@ import afconfig  # noqa: E402
 # 3.10 ([skip ci] on the staging merge, pipelines only by dispatch, DEV-chosen wipe of staging data, no CI mobile build) adds
 # ~0.33k to a DEV spawn, dev.md trimmed to stay in its own budget: a wipe refused while staging is in use spares a person's
 # QC data, and skipping push pipelines + mobile builds saves runner time on every deploy.
+# 3.11 (a parent ticket and its sub-issues as one ticket: one PR, one staging test, one review and QC; staging releases
+# what the task needs, chosen by DEV — mobile build and wipe included — and the build for a person's QC goes out when the
+# ticket enters In QC) adds ~0.55k to the protocol, ~0.4k to SA, ~0.6k to the orchestrator, ~0.15k to DEV: superseding,
+# toggles and Status of sub-issues live in agentflow-board (tested code), the prompts only call it. A ticket that needs no
+# new server/web skips the deploy, and N sub-issues cost one DEV/SA/QC chain instead of N.
 BUDGETS = {
-    "agents/sa.md": 10100, "agents/dev.md": 13000,
-    "references/protocol.md": 13000, "references/dispatch.md": 9100, "references/design.md": 2600, "references/automation.md": 7100,
+    "agents/sa.md": 10500, "agents/dev.md": 13200,
+    "references/protocol.md": 13550, "references/dispatch.md": 9750, "references/design.md": 2600, "references/automation.md": 7100,
     "references/engineering.md": 3000, "references/clarify.md": 6650,
-    "skills/init/SKILL.md": 11200, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 2800, "skills/doctor/SKILL.md": 2000,
-    "skills/run/SKILL.md": 2400, "skills/status/SKILL.md": 2850, "skills/task/SKILL.md": 9850, "skills/init/references/board-setup.md": 5550,
+    "skills/init/SKILL.md": 11300, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 3000, "skills/doctor/SKILL.md": 2000,
+    "skills/run/SKILL.md": 2400, "skills/status/SKILL.md": 2850, "skills/task/SKILL.md": 10150, "skills/init/references/board-setup.md": 5550,
     "agents/audit.md": 4400, "references/audit-qa.md": 4800, "references/audit-arch.md": 3750, "references/audit-product.md": 2850,
     "skills/checklist/SKILL.md": 6050,
 }
@@ -54,7 +59,7 @@ BUDGETS = {
 # The auditor reads one lens a spawn: qa (its reference + automation.md) is the costliest.
 SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"],
                "audit": ["references/audit-qa.md", "references/automation.md"]}
-PER_SPAWN_LIMIT = {"sa": 26050, "dev": 36000, "audit": 29150}
+PER_SPAWN_LIMIT = {"sa": 27000, "dev": 36750, "audit": 29650}
 DESCRIPTION_LIMIT = 700
 
 
@@ -417,10 +422,10 @@ class StateMachine(unittest.TestCase):
         ("agents/dev.md", r"\|\| \{ echo MERGE_CONFLICT", "conflict dừng khối deploy"),
         ("agents/dev.md", r"Không bao giờ merge staging vào nhánh ticket", "DEV không đưa code ticket khác vào PR"),
         ("agents/dev.md", r"--wait 2\.5", "chờ pipeline dưới 180 giây, vẫn trong TTL của prompt cache"),
-        ("agents/dev.md", r"`--skip '<glob>'` cho mỗi mục `staging.skip_checks`", "không chờ release mobile"),
+        ("agents/dev.md", r"--wait 2\.5` \(không chờ bản build QC\)", "không chờ release mobile của bản QC"),
         ("agents/dev.md", r'merge --no-ff --no-edit -m "af: deploy <branch> \[skip ci\]"', "push staging không tự chạy CI"),
-        ("agents/dev.md", r"Không dispatch build/distribute mobile", "mặc định không build CI mobile"),
-        ("agents/dev.md", r"`--wipe --issue <n>`.*Exit 5.*dispatch thường", "wipe bị từ chối thì không xoá dữ liệu người khác"),
+        ("agents/dev.md", r"Ô build app mobile chỉ khi task cần app build trên CI", "mặc định không build CI mobile, agent bật khi task cần"),
+        ("agents/dev.md", r"Ô `wipe` \(xoá dữ liệu, kèm `--issue <n>`\).*exit 5.*dispatch không wipe", "wipe bị từ chối thì không xoá dữ liệu người khác"),
         ("agents/dev.md", r"Tối đa `run.max_test_rounds` vòng", "vòng sửa test có trần"),
         ("agents/dev.md", r"\*\*Lỗi block\*\*.*`\[AF:DEV\] blocked`", "hết vòng thì ghi lỗi block lên issue"),
         ("agents/dev.md", r"gắn `blocked`, giữ `in_progress`, mention `people.po`", "lỗi block báo PO"),
@@ -485,6 +490,19 @@ class StateMachine(unittest.TestCase):
         ("references/audit-arch.md", r"Số đo chỉ nói \*\*chỗ cần đọc\*\*", "radar không thay cho đọc code"),
         ("references/audit-product.md", r"không gửi tên khách hàng, code, dữ liệu nội bộ", "WebSearch không lộ dữ liệu của repo"),
         ("references/audit-product.md", r"`Chưa rõ: <câu hỏi> \(đề xuất", "PO chốt con số agent đề xuất"),
+        # 3.11: a parent and its sub-issues run as one ticket; staging releases what the diff ships, the QC build on In QC
+        ("references/dispatch.md", r"agentflow-board group <owner/repo>.*`in_group`.*bỏ qua", "sub của nhóm không bị nhận riêng"),
+        ("references/dispatch.md", r"agentflow-board group-sync <owner/repo> --issue <n>", "Status của sub theo cha"),
+        ("references/dispatch.md", r"SA trả `in_qc · waiting_human` ⇒ SYS \*qc-build\*", "bản app cho QC người chỉ khi ticket sang In QC"),
+        ("references/dispatch.md", r"\*qc-build\*.*--qc --issue <n>", "orchestrator phát bản QC theo qc_release DEV ghi"),
+        ("agents/dev.md", r"agentflow-board workflows <REPO>.*dispatch <REPO> --on <ô cần bật>", "DEV đọc ô của workflow rồi tự quyết theo task"),
+        ("agents/dev.md", r"`qc_release: <ô cần bật cho bản cài QC tay", "DEV quyết bản cài cho QC tay"),
+        ("agents/dev.md", r"`stalled` ⇒ `\[AF:DEV\] blocked`", "dispatch không chạy gì thì báo người, không chờ mãi"),
+        ("agents/dev.md", r"\*\*Chờ deploy\*\* khi state `deploy_wait` ≠ `false`", "lượt verify không chờ pipeline không có"),
+        ("agents/sa.md", r"nhóm: `group: <sub gộp>`", "SA chốt tập sub của nhóm"),
+        ("agents/sa.md", r"DoR, Size xét từng sub", "nhóm lớn vẫn qua DoR theo từng sub"),
+        ("skills/task/SKILL.md", r"chỉ Ready khi PO chọn làm chung một PR", "cha chỉ vào pipeline khi PO chốt làm chung"),
+        ("skills/do/SKILL.md", r"`in_group` ⇒ dừng", "/do không làm riêng sub của nhóm"),
     ]
 
     def test_rules_still_stated(self):

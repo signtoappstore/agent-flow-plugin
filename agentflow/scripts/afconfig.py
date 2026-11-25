@@ -22,7 +22,6 @@ HOME_SECRETS = (".ssh/", ".aws/credentials", ".config/gh/hosts.yml", ".claude/.c
 STAGES = ["backlog", "ready", "in_progress", "in_review", "in_qc", "ready_to_merge", "done"]
 LABEL_KEYS = ["agent", "blocked", "needs_info", "changes_requested", "qc_failed", "qc_manual"]
 PLATFORM_KEY = "platform"  # labels.platform: platform name → label, optional (3.7 replaced the board field Platform)
-WORKFLOW_WHEN = ("push", "need")
 WORKFLOW_FILE = re.compile(r"^[\w.-]+\.ya?ml$")
 INPUT_NAME = re.compile(r"^[A-Za-z_][\w-]*$")
 TOP_KEYS = {"schema", "lang", "board", "classify", "types", "labels", "git", "surfaces", "e2e_map", "forbidden", "design", "staging",
@@ -317,21 +316,54 @@ def label_names(cfg):
 
 
 def staging_workflows(cfg):
-    """staging.workflows normalised to [{file, when, inputs, wipe}], entries without a file dropped. `wipe` = name of the
-    workflow's boolean input that wipes staging data (DEV turns it on with `dispatch --wipe`), None when not declared."""
+    """staging.workflows normalised to [{file, inputs}]: the workflows the agent may dispatch on staging, written as a file
+    name or {file, inputs: fixed values of non-boolean inputs}. Keys of earlier versions (when, platform, toggles, wipe) are
+    ignored: the agent reads the boolean inputs of the workflow itself."""
     out = []
     for item in as_list(((cfg or {}).get("staging") or {}).get("workflows")):
-        if isinstance(item, dict) and item.get("file"):
-            out.append({"file": str(item["file"]), "when": item.get("when"), "inputs": item.get("inputs") or {},
-                        "wipe": str(item["wipe"]) if item.get("wipe") else None})
+        if isinstance(item, str) and item:
+            out.append({"file": item, "inputs": {}})
+        elif isinstance(item, dict) and item.get("file"):
+            out.append({"file": str(item["file"]), "inputs": item.get("inputs") if isinstance(item.get("inputs"), dict) else {}})
     return out
 
 
 def staging_skip_ci(cfg):
-    """staging.skip_ci, default on: DEV's merge commit on staging carries [skip ci], so pipelines run only by dispatch.
-    Off while no workflow is dispatched after each push (`when: push`): skipping CI then would deploy nothing."""
-    on = ((cfg or {}).get("staging") or {}).get("skip_ci") is not False
-    return on and any(w["when"] == "push" for w in staging_workflows(cfg))
+    """DEV's merge commit on staging carries [skip ci] when the agent dispatches the staging workflows: a push-triggered run
+    would only repeat the release. Harmless once no workflow runs on push. None declared ⇒ CI on push deploys, keep it."""
+    return bool(staging_workflows(cfg))
+
+
+WIPE_INPUT = re.compile(r"wipe|drop|purge|truncate|erase|reset|xoá|xóa", re.I)
+
+
+def dispatch_inputs(text):
+    """{name: {type, default, description, wipe}} of the workflow_dispatch inputs of a workflow file; None when it has no
+    workflow_dispatch trigger. `wipe` = the input deletes staging data (by its name or description)."""
+    lines = (text or "").splitlines()
+    start = next((i for i, line in enumerate(lines) if re.match(r"""^["']?on["']?\s*:""", line)), None)
+    if start is None:
+        return None
+    block = ["trigger:" + lines[start].split(":", 1)[1]]
+    for line in lines[start + 1:]:
+        if line.strip() and not line[:1].isspace():
+            break
+        block.append(line)
+    trigger = parse_yaml("\n".join(block)).get("trigger")
+    if isinstance(trigger, str):
+        trigger = {t.strip(): None for t in trigger.strip("[]").split(",")}
+    elif isinstance(trigger, list):
+        trigger = {str(t): None for t in trigger}
+    if not isinstance(trigger, dict) or "workflow_dispatch" not in trigger:
+        return None
+    raw = ((trigger.get("workflow_dispatch") or {}).get("inputs")) or {}
+    out = {}
+    for name, spec in raw.items():
+        spec = spec if isinstance(spec, dict) else {}
+        desc = str(spec.get("description") or "")
+        out[str(name)] = {"type": str(spec.get("type") or "string"), "default": spec.get("default"), "description": desc,
+                          "wipe": bool(WIPE_INPUT.search(str(name)) or re.search(r"\b(wipe|drop|delete|erase|purge)\b|xoá|xóa", desc, re.I))}
+    return out
 
 
 def _check_platform(cfg, fail, warn):
@@ -351,32 +383,37 @@ def _check_platform(cfg, fail, warn):
             warn("surfaces.%s.platform = %r không phải key của labels.platform (%s)" % (key, platform, ", ".join(sorted(keys))))
 
 
-def _check_workflows(staging, fail):
+def _check_workflows(cfg, fail, warn):
+    staging = cfg.get("staging") or {}
+    for key, why in (("skip_ci", "plugin tự gắn [skip ci] khi có staging.workflows"), ("timeout_min", "DEV chờ tới khi run kết thúc"),
+                     ("build", "app cho QC do agent phát, comment [AF:SYS] qc-build nêu run"),
+                     ("skip_checks", "DEV không chờ bản build QC agent phát, tự nhận ra")):
+        if key in staging:
+            warn("staging.%s không còn cần (%s) — xoá được" % (key, why))
     items = staging.get("workflows")
     if items is None:
         return
     if not isinstance(items, list):
-        fail("staging.workflows phải là danh sách, vd [{file: deploy-staging.yml, when: push}]")
+        fail("staging.workflows phải là danh sách file workflow, vd [staging.yml]")
         return
     seen = set()
     for i, item in enumerate(items):
         name = "staging.workflows[%d]" % i
-        if not isinstance(item, dict) or not WORKFLOW_FILE.match(str(item.get("file") or "")):
-            fail("%s.file phải là tên file trong .github/workflows, vd deploy-staging.yml" % name)
+        file = item if isinstance(item, str) else item.get("file") if isinstance(item, dict) else None
+        if not WORKFLOW_FILE.match(str(file or "")):
+            fail("%s phải là tên file trong .github/workflows, vd staging.yml" % name)
             continue
-        if item["file"] in seen:
-            fail("%s: %s khai hai lần" % (name, item["file"]))
-        seen.add(item["file"])
-        if item.get("when") not in WORKFLOW_WHEN:
-            fail("%s.when phải là push hoặc need (đang là %r)" % (name, item.get("when")))
+        if file in seen:
+            fail("%s: %s khai hai lần" % (name, file))
+        seen.add(file)
+        if not isinstance(item, dict):
+            continue
+        old = sorted(k for k in ("when", "platform", "toggles", "wipe") if k in item)
+        if old:
+            warn("%s: %s không còn dùng — agent đọc ô (input boolean) của workflow; ghi gọn `- %s`" % (name, ", ".join(old), file))
         inputs = item.get("inputs")
         if inputs is not None and (not isinstance(inputs, dict) or any(isinstance(v, (dict, list)) for v in inputs.values())):
-            fail("%s.inputs phải là map tên → giá trị đơn, vd {env: staging}" % name)
-        wipe = item.get("wipe")
-        if wipe is not None and not (isinstance(wipe, str) and INPUT_NAME.match(wipe)):
-            fail("%s.wipe phải là tên input boolean của workflow, vd wipe_data" % name)
-        elif wipe is not None and isinstance(inputs, dict) and wipe in inputs:
-            fail("%s: input %s vừa ở wipe vừa ở inputs — DEV tự chọn wipe, đừng cố định nó" % (name, wipe))
+            fail("%s.inputs phải là map tên → giá trị đơn (input không phải boolean), vd {env: staging}" % name)
 
 
 def validate_config(cfg):
@@ -444,14 +481,10 @@ def validate_config(cfg):
         fail("e2e_map phải là map glob path → danh sách tag của flow, vd \"backend/services/inbox/**\": [inbox]")
     for key in ("parallel", "max_tasks", "max_review_rounds", "max_qc_rounds", "max_test_rounds", "max_regression"):
         positive_int("run", key)
-    positive_int("staging", "timeout_min")
     skip = (cfg.get("staging") or {}).get("skip_checks")
     if skip is not None and not all(isinstance(x, str) and x for x in as_list(skip)):
         fail("staging.skip_checks phải là danh sách tên check (glob), vd [\"distribute-mobile*\"]")
-    skip_ci = (cfg.get("staging") or {}).get("skip_ci")
-    if skip_ci is not None and not isinstance(skip_ci, bool):
-        fail("staging.skip_ci phải là true hoặc false (đang là %r)" % skip_ci)
-    _check_workflows(cfg.get("staging") or {}, fail)
+    _check_workflows(cfg, fail, warn)
     _check_clarify(cfg.get("clarify"), fail, warn)
     models = (cfg.get("run") or {}).get("models") or {}
     if not isinstance(models.get("dev") or {}, dict) or not (models.get("dev") or {}).get("default"):

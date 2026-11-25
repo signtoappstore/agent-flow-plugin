@@ -107,13 +107,10 @@ class Validate(unittest.TestCase):
             (lambda c: c.update(clarify="ask"), "clarify phải là map"),
             (lambda c: c["labels"].update(platform=["platform:web"]), "labels.platform"),
             (lambda c: c["staging"].update(workflows={"file": "x.yml"}), "staging.workflows phải là danh sách"),
-            (lambda c: c["staging"].update(workflows=[{"file": "../deploy.yml", "when": "push"}]), "staging.workflows[0].file"),
-            (lambda c: c["staging"].update(workflows=[{"file": "deploy.yml", "when": "always"}]), "staging.workflows[0].when"),
-            (lambda c: c["staging"].update(workflows=[{"file": "deploy.yml", "when": "push", "wipe": "a b"}]), "staging.workflows[0].wipe"),
-            (lambda c: c["staging"].update(workflows=[{"file": "deploy.yml", "when": "push", "wipe": "reset", "inputs": {"reset": True}}]), "vừa ở wipe vừa ở inputs"),
-            (lambda c: c["staging"].update(skip_ci="yes"), "staging.skip_ci"),
-            (lambda c: c["staging"].update(workflows=[{"file": "d.yml", "when": "push"}, {"file": "d.yml", "when": "need"}]), "khai hai lần"),
-            (lambda c: c["staging"].update(workflows=[{"file": "d.yml", "when": "push", "inputs": {"a": [1]}}]), "inputs"),
+            (lambda c: c["staging"].update(workflows=["../deploy.yml"]), "staging.workflows[0] phải là tên file"),
+            (lambda c: c["staging"].update(workflows=[{"file": "../deploy.yml"}]), "staging.workflows[0] phải là tên file"),
+            (lambda c: c["staging"].update(workflows=["d.yml", {"file": "d.yml"}]), "khai hai lần"),
+            (lambda c: c["staging"].update(workflows=[{"file": "d.yml", "inputs": {"a": [1]}}]), "inputs"),
         ]
         for change, needle in cases:
             cfg = filled_config()
@@ -129,9 +126,58 @@ class Validate(unittest.TestCase):
         self.assertTrue(any("oops" in m for m in warns))
         self.assertTrue(any("git.protected" in m for m in warns))
 
+    def test_agent_reads_the_inputs_of_the_workflow_itself(self):
+        text = """name: staging
+"on":
+  push:
+    branches: [staging]
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Run backend quality and deploy the stack
+        type: boolean
+        default: true
+      wipe_data:
+        description: Drop the mongo volumes before the rollout, no backup
+        type: boolean
+        default: false
+      env:
+        description: Target
+        type: string
+        default: staging
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+"""
+        inputs = afconfig.dispatch_inputs(text)
+        self.assertEqual({n: (i["type"], i["default"], i["wipe"]) for n, i in inputs.items()},
+                         {"backend": ("boolean", True, False), "wipe_data": ("boolean", False, True), "env": ("string", "staging", False)})
+        self.assertEqual(afconfig.dispatch_inputs("on: [push, workflow_dispatch]\n"), {})
+        self.assertIsNone(afconfig.dispatch_inputs("on:\n  push:\n    branches: [staging]\n"))
+        self.assertTrue(afconfig.dispatch_inputs("on:\n  workflow_dispatch:\n    inputs:\n      reset_db:\n        type: boolean\n")["reset_db"]["wipe"])
+
+    def test_workflows_are_a_list_of_files(self):
+        cfg = filled_config()
+        cfg["staging"]["workflows"] = ["staging.yml", {"file": "seed.yml", "inputs": {"env": "staging"}}]
+        self.assertEqual(self.problems(cfg), [])
+        self.assertEqual(afconfig.staging_workflows(cfg), [{"file": "staging.yml", "inputs": {}}, {"file": "seed.yml", "inputs": {"env": "staging"}}])
+        self.assertTrue(afconfig.staging_skip_ci(cfg))
+        cfg["staging"]["workflows"] = []
+        self.assertFalse(afconfig.staging_skip_ci(cfg), "không khai workflow ⇒ CI tự chạy khi push là đường deploy")
+
+    def test_keys_of_earlier_versions_still_read_and_named_for_removal(self):
+        cfg = filled_config()
+        cfg["staging"].update(skip_ci=False, timeout_min=30, build="TestFlight", skip_checks=["Distribute*"],
+                              workflows=[{"file": "deploy.yml", "when": "push", "toggles": {"mobile": "mobile"}, "wipe": "wipe_data"}])
+        self.assertEqual(self.problems(cfg), [])
+        warns = " ".join(m for level, m in afconfig.validate_config(cfg) if level == "warn")
+        for key in ("staging.skip_ci", "staging.timeout_min", "staging.build", "staging.skip_checks", "staging.workflows[0]: toggles, when, wipe"):
+            self.assertIn(key, warns)
+        self.assertEqual(afconfig.staging_workflows(cfg), [{"file": "deploy.yml", "inputs": {}}])
+
     def test_platform_labels_and_staging_workflows(self):
         cfg = filled_config()
-        cfg["staging"]["workflows"] = [{"file": "deploy-staging.yml", "when": "push", "inputs": {"env": "staging"}}, {"file": "apk.yaml", "when": "need"}]
+        cfg["staging"]["workflows"] = [{"file": "deploy-staging.yml", "inputs": {"env": "staging"}}, "apk.yaml"]
         cfg["surfaces"] = {"app": {"path": "mobile/", "platform": "Mobile"}, "site": {"path": "web/", "platform": "desktop"}}
         cfg["board"]["fields"] = {"priority": "Priority", "platform": "Platform"}
         self.assertEqual(self.problems(cfg), [])
@@ -140,12 +186,6 @@ class Validate(unittest.TestCase):
         self.assertTrue(any("surfaces.site.platform" in m for m in warns), warns)
         self.assertFalse(any("surfaces.app" in m for m in warns), warns)
         self.assertEqual([w["file"] for w in afconfig.staging_workflows(cfg)], ["deploy-staging.yml", "apk.yaml"])
-        self.assertEqual([w["wipe"] for w in afconfig.staging_workflows(cfg)], [None, None])
-        self.assertTrue(afconfig.staging_skip_ci(cfg))
-        cfg["staging"]["skip_ci"] = False
-        self.assertFalse(afconfig.staging_skip_ci(cfg))
-        cfg["staging"].update(skip_ci=True, workflows=[{"file": "seed.yml", "when": "need"}])
-        self.assertFalse(afconfig.staging_skip_ci(cfg), "không có workflow when: push thì [skip ci] sẽ không deploy gì")
         self.assertIn("platform:backend", afconfig.label_names(cfg))
         del cfg["labels"]["platform"]
         self.assertTrue(any("labels.platform chưa khai" in m for level, m in afconfig.validate_config(cfg)))

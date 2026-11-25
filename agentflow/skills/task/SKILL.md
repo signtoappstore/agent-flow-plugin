@@ -41,7 +41,7 @@ Thứ tự hỏi, dừng khi mục đã rõ: **vấn đề** (ai gặp, lúc nà
 
 Hỏi hết điểm mở trước khi soạn. **Nguồn**: mỗi ý trong body từ lời PO hoặc tài liệu; luật, con số, ngưỡng bạn tự đặt (cả đo thành công) chỉ nằm ở `Chưa rõ: <câu hỏi>` tới khi PO chọn, kể cả PO nói "xong".
 
-**Cấu trúc — PO chốt**: dấu hiệu (kể nhiều việc; Size option cuối hoặc > 7 AC, kể cả lộ ra lúc soạn; ≥ 2 lát giá trị giao riêng được) → AskUserQuestion, preview = tiêu đề + số AC từng ticket: **1 ticket** (Size option cuối thì kẹt §6) · **cha + sub-issue** (chung mục tiêu; cắt theo lát giá trị người dùng, không theo tầng; sub 3–7 AC; cha = mục tiêu + danh sách việc, ở Backlog mãi; mode `#n` thì #n làm cha) · **N ticket độc lập**. Không dấu hiệu → 1 ticket, không hỏi. Chưa trả lời → không tạo issue thứ hai. Chọn cha + sub → tạo cha (§4–§5), rồi từng sub qua §4–§8; phụ thuộc ghi `Bị chặn bởi #m`.
+**Cấu trúc — PO chốt**: dấu hiệu (kể nhiều việc; Size option cuối hoặc > 7 AC, kể cả lộ ra lúc soạn; ≥ 2 lát giá trị giao riêng được) → AskUserQuestion, preview = tiêu đề + số AC từng ticket: **1 ticket** (Size option cuối thì kẹt §6) · **cha + sub-issue** (chung mục tiêu; cắt theo lát giá trị người dùng, không theo tầng; sub 3–7 AC; cha = mục tiêu + danh sách việc, ở Backlog khi giao riêng từng sub, sang Ready khi làm chung một PR (§6); mode `#n` thì #n làm cha) · **N ticket độc lập**. Không dấu hiệu → 1 ticket, không hỏi. Chưa trả lời → không tạo issue thứ hai. Chọn cha + sub → tạo cha (§4–§5), rồi từng sub qua §4–§8; phụ thuộc ghi `Bị chặn bởi #m`.
 
 ## 4. Soạn
 
@@ -79,9 +79,10 @@ Chỉ chuyển sang `ready` khi đủ cả:
 - Field `required` có nội dung, không còn `Chưa rõ`, ≥ 1 dòng `- [ ]`, mọi AC phán được đúng/sai.
 - Priority, Size có giá trị (field có trong config); Size không phải option cuối; ≥ 1 label `labels.platform` (khi config có).
 - Có assignee; có milestone khi repo có milestone mở.
-- Không `Bị chặn bởi #m` với #m còn mở; không phải issue cha có sub-issue (`issue_read method=get_sub_issues`); không `blocked`; `needs_info` chỉ khi câu hỏi đã được trả lời trong body (gỡ ở §7).
+- Không `Bị chặn bởi #m` với #m còn mở; không `blocked`; `needs_info` chỉ khi câu hỏi đã được trả lời trong body (gỡ ở §7).
+- **Cha có sub mở** (`issue_read method=get_sub_issues`): chỉ Ready khi PO chọn làm chung một PR (một lượt test, review, QC — protocol §2); mỗi sub đạt cổng như trên (Size xét từng sub, cha cần Priority, assignee), sub không Ready riêng. Không thì cha ở Backlog, sub qua cổng riêng.
 
-Hỏi PO (AskUserQuestion, kèm link `#n`): đạt → "Chuyển #n sang `<board.status.ready>`" · "Để ở Backlog" (đang `ready` + `needs_info` → "Gỡ needs-info để agent nhận lại" · "Giữ"). Chưa đạt → nói thiếu gì: "Bổ sung ngay (Recommended)" — hỏi mục thiếu, ghi lại (§4–§5), xét lại · "Để ở Backlog".
+Hỏi PO (AskUserQuestion, kèm link `#n`): đạt → "Chuyển #n sang `<board.status.ready>`" (cha: "Làm chung #a #b… trong một PR") · "Để ở Backlog" (đang `ready` + `needs_info` → "Gỡ needs-info để agent nhận lại" · "Giữ"). Chưa đạt → nói thiếu gì: "Bổ sung ngay (Recommended)" — hỏi mục thiếu, ghi lại (§4–§5), xét lại · "Để ở Backlog".
 
 ## 7. Ghi quyết định (protocol §6)
 

@@ -154,7 +154,7 @@ READ_ONLY = ("sa", "audit")  # roles that change no git ref, push nothing and ru
 ROLE_NAME = {"sa": "SA", "audit": "Audit", "dev": "DEV"}
 # What the auditor may call: reads only. A list of reads, not of writes, so a tool the server adds later stays closed.
 AUDIT_MCP_READ = re.compile(r"^(get|list|search)_|_(read|get|list)$|^(get_me|whoami|create_session)$")
-AUDIT_BOARD_READ = {"whoami", "inspect", "items", "milestones", "metrics", "checks", "repo"}
+AUDIT_BOARD_READ = {"whoami", "inspect", "items", "milestones", "metrics", "checks", "repo", "group"}
 AUDIT_GH_READ = {"list", "view", "status", "diff", "checks"}
 
 
@@ -959,6 +959,10 @@ def check_board_tool(args, session):
         block("Audit chỉ đọc board (`agentflow-board %s`)." % "|".join(sorted(AUDIT_BOARD_READ)))
     if sub == "platform-migrate" and session.role:
         block("subagent không chuyển dữ liệu board — `/agentflow:init` làm, người duyệt.")
+    if sub == "group-sync" and session.role:
+        block("Status của sub-issue theo nhóm do orchestrator đồng bộ (`agentflow-board group-sync`).")
+    if sub == "dispatch" and session.role == "dev" and "--qc" in args:
+        block("bản build cho QC người (`--qc`) do orchestrator chạy khi ticket sang In QC — DEV ghi `qc_release` vào state lúc giao review.")
 
 
 def glob_hits_secret(pattern):

@@ -23,6 +23,7 @@ Paginate tới hết. Board có thể dùng chung nhiều repo, số issue trùn
 Mỗi lượt **một lần**:
 - `query: is:closed is:issue repo:<owner>/<repo> label:"<labels.agent>" -label:"<labels.blocked>" -status:"<done>"` → issue đã đóng mà card chưa `done` (merge với `Closes`, workflow board tắt) → SYS *done*; riêng khi PR `state.pr` còn mở: gắn `blocked`, `[AF:SYS] stuck`.
 - Ticket `A` ở `in_review`, `in_qc`, `ready_to_merge`: **một** lệnh `agentflow-board feedback <owner/repo> --summary --issue <n> --issue <m> …` → `pending` > 0 = người còn góp ý trên PR chưa được trả lời. Lệnh lỗi ⇒ coi như 0, journal `tool_error`.
+- Mọi item: **một** lệnh `agentflow-board group <owner/repo> --issue <n> …` → `in_group` (sub đi theo cha, protocol §2) ⇒ bỏ qua; `subs`/`group` có = ticket nhóm. Lỗi ⇒ coi như không nhóm, journal `tool_error`.
 
 ## 3. Bảng hành động
 
@@ -55,6 +56,7 @@ Mỗi lượt **một lần**:
 - *qc-failed*: `qc_round += 1`, trừ khi state đã `stage: ready` (chạy lại sau crash) (vượt `max_qc_rounds` → escalate theo protocol §7 và không spawn DEV); comment `[AF:SYS] qc-failed`; gỡ `qc_manual`, giữ `qc_failed`; state `stage: ready`; Status → `ready`.
 - *confirmed*: state `plan: ok`; comment `[AF:SYS] confirmed` (kế hoạch của `[AF:SA] design @<sha>`); Status giữ `ready`.
 - *requeue*: state `stage: in_progress`, `next: DEV deploy + chạy flow trên staging`; comment `[AF:SYS] requeue`; gỡ label cũ `deploying` nếu có; Status → `in_progress`.
+- *qc-build*: `agentflow-board dispatch <owner/repo> --qc --issue <n>` (bật ô `qc_release` DEV ghi trong state); `dispatched` khác rỗng ⇒ comment `[AF:SYS] qc-build` (workflow, `@<people.qc>` test khi build xong). Lỗi ⇒ comment để QC người tự chạy. Status giữ.
 
 ## 4. Thứ tự và model
 
@@ -66,7 +68,7 @@ Model: DEV = `run.models.dev[<Size>]` nếu có, không thì `run.models.dev.def
 
 ```
 Agent(subagent_type="agentflow:<sa|dev>", model=<model>, run_in_background=<true khi parallel > 1>,
-      prompt="REPO: <owner/repo>\nISSUE: #<n>\nITEM_ID: <item_id>\nSTAGE: <stage key, vd in_review, sau SYS transition>\nMODE: <mode của bảng §3, hoặc verify theo §6>\nSIZE: <Size, chỉ DEV, nếu có>\nCLARIFY: <auto|ask|ask-live, chỉ SA design>")
+      prompt="REPO: <owner/repo>\nISSUE: #<n>\nITEM_ID: <item_id>\nSTAGE: <stage key, vd in_review, sau SYS transition>\nMODE: <mode của bảng §3, hoặc verify theo §6>\nSIZE: <Size, chỉ DEV, nếu có>\nCLARIFY: <auto|ask|ask-live, chỉ SA design>\nGROUP: <subs, chỉ SA design ticket nhóm>")
 ```
 
 - Song song: tối đa `run.parallel` ticket **khác nhau** cùng chạy, agent chạy nền (spawn thường giữ orchestrator tới khi xong ⇒ thành tuần tự); mỗi thông báo xong ⇒ §6 cho ticket đó, slot trống thì lấp ngay. Một ticket không bao giờ có 2 agent cùng lúc. Mỗi ticket một worktree (protocol §8).
@@ -75,7 +77,7 @@ Agent(subagent_type="agentflow:<sa|dev>", model=<model>, run_in_background=<true
 
 ## 6. Sau mỗi kết quả
 
-1. Đọc khối `RESULT` (bỏ qua narrative). Đọc lại Status bằng `get_project_item` (`field_names: ["Status"]`) — **Status là sự thật**. Không có `RESULT`: thông báo nói agent còn chạy nền ⇒ chờ thông báo kế. Đã dừng hẳn (`maxTurns`, chết giữa chừng) ⇒ `SendMessage` (ToolSearch) cho chính agent đó **một lần** "làm nốt, kết thúc bằng khối RESULT" (tính một spawn); vẫn không có ⇒ gắn `blocked`, comment `[AF:SYS] stuck — <agent> dừng không có RESULT, ticket ở <stage>`, journal `tool_error`, dừng ticket.
+1. Đọc khối `RESULT` (bỏ qua narrative). Đọc lại Status bằng `get_project_item` (`field_names: ["Status"]`) — **Status là sự thật**. Ticket nhóm: sau mỗi kết quả, SYS transition ⇒ `agentflow-board group-sync <owner/repo> --issue <n>`. SA trả `in_qc · waiting_human` ⇒ SYS *qc-build*. Không có `RESULT`: thông báo nói agent còn chạy nền ⇒ chờ thông báo kế. Đã dừng hẳn (`maxTurns`, chết giữa chừng) ⇒ `SendMessage` (ToolSearch) cho chính agent đó **một lần** "làm nốt, kết thúc bằng khối RESULT" (tính một spawn); vẫn không có ⇒ gắn `blocked`, comment `[AF:SYS] stuck — <agent> dừng không có RESULT, ticket ở <stage>`, journal `tool_error`, dừng ticket.
 2. RESULT ≠ `ok`, `verify` (`decide`: `/do` ask làm theo `clarify.md` §Điều phối; `waiting_human`, `needs_info`, `blocked`, `escalated`, `abort`) → **dừng ticket**, đếm là 1 ticket xong.
 3. RESULT `ok` + tới `ready_to_merge` → dừng ticket, đếm 1. RESULT `verify` (DEV đã code + deploy, Status vẫn `in_progress`) → spawn ngay DEV `MODE=verify`, `STAGE: in_progress` cho ticket đó (context mới); `verify` hai lần liền ⇒ như no-progress (5).
 4. RESULT `ok` + stage mới do agent sở hữu → **đi tiếp ngay ticket đó** ở lượt spawn kế (chain SA design → DEV → SA review; SA ❌ → DEV `MODE=rework` → SA …). Ticket ở `ready`: đọc state rồi chọn dòng §3.

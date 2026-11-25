@@ -121,6 +121,19 @@ class Checks(BoardCase):
         self.setup_head(runs=[{"name": "distribute-mobile", "status": "in_progress", "conclusion": None}])
         self.assertEqual(self.checks("--skip", "distribute-mobile")[1]["state"], "success")
 
+    def test_a_dispatch_that_started_nothing_is_stalled(self):
+        self.setup_head()
+        self.gh.on("GET", "/actions/runs?branch=staging", {"workflow_runs": []})
+        since = lambda m: (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+        self.assertTrue(self.checks("--since", since(11))[1].get("stalled"))
+        self.assertNotIn("stalled", self.checks("--since", since(3))[1])
+
+    def test_run_waiting_behind_its_concurrency_group_is_queued(self):
+        self.setup_head()
+        self.gh.on("GET", "/actions/runs?branch=staging", {"workflow_runs": [{"id": 1, "status": "queued", "head_sha": SHA}]})
+        res = self.checks()[1]
+        self.assertEqual((res["state"], res.get("queued")), ("pending", True))
+
     def test_identical_head_contains(self):
         self.setup_head(compare="identical")
         self.assertTrue(self.checks()[1]["contains"])
@@ -506,24 +519,41 @@ class Doctor(BoardCase):
     def test_declared_workflow_must_exist_and_accept_dispatch(self):
         import base64
         self.write_config(CONFIG.replace('staging: {branch: staging, url: "https://s.example"}',
-                                         'staging:\n  branch: staging\n  url: "https://s.example"\n  workflows:\n    - {file: deploy.yml, when: push}\n    - {file: apk.yml, when: need}'))
+                                         'staging:\n  branch: staging\n  url: "https://s.example"\n  workflows:\n    - deploy.yml\n    - apk.yml'))
         for name, text in (("deploy.yml", b"on:\n  workflow_dispatch:\n"), ("apk.yml", b"on:\n  push:\n")):  # ahead of the /repos/acme/app route
             self.gh.routes.insert(0, ("GET", "/contents/.github/workflows/" + name, {"content": base64.b64encode(text).decode()}, 200, {}))
         code, out = self.doctor()
         self.assertEqual(code, 1, out)
-        self.assertIn("✓ workflow deploy.yml (push) dispatch được trên staging", out)
-        self.assertIn("apk.yml không có trigger workflow_dispatch", out)
+        self.assertIn("✓ workflow deploy.yml dispatch được trên staging — ô agent chọn: không có", out)
+        self.assertIn("apk.yml không có trên staging hoặc không có trigger workflow_dispatch", out)
 
-    def test_wipe_input_must_exist_and_skip_ci_needs_a_push_workflow(self):
+    def test_doctor_lists_the_inputs_the_agent_picks_from(self):
         import base64
         self.write_config(CONFIG.replace('staging: {branch: staging, url: "https://s.example"}',
-                                         'staging:\n  branch: staging\n  url: "https://s.example"\n  skip_ci: true\n  workflows:\n    - {file: deploy.yml, when: need, wipe: wipe_data}'))
-        self.gh.routes.insert(0, ("GET", "/contents/.github/workflows/deploy.yml",
-                                  {"content": base64.b64encode(b"on:\n  workflow_dispatch:\n    inputs:\n      reset:\n").decode()}, 200, {}))
+                                         'staging:\n  branch: staging\n  url: "https://s.example"\n  workflows: [deploy.yml]'))
+        text = b"on:\n  workflow_dispatch:\n    inputs:\n      mobile:\n        type: boolean\n      wipe_data:\n        type: boolean\n"
+        self.gh.routes.insert(0, ("GET", "/contents/.github/workflows/deploy.yml", {"content": base64.b64encode(text).decode()}, 200, {}))
         code, out = self.doctor()
-        self.assertEqual(code, 1, out)
-        self.assertIn("deploy.yml không có input wipe_data", out)
-        self.assertIn("skip_ci: true chưa có tác dụng", out)
+        self.assertEqual(code, 0, out)
+        self.assertIn("ô agent chọn: mobile, wipe_data (xoá dữ liệu)", out)
+
+    def test_doctor_names_workflows_still_running_on_push_and_old_keys(self):
+        import base64
+        staging = 'staging:\n  branch: staging\n  url: "https://s.example"\n%s  workflows:\n    - staging.yml\n'
+        workflows = {"staging.yml": b'"on":\n  workflow_dispatch:\n', "release.yml": b'"on":\n  push:\n    branches:\n      - master\n',
+                     "lint.yml": b"on:\n  push:\n    branches: ['**']\n  workflow_dispatch:\n"}
+        for name, text in workflows.items():
+            self.gh.routes.insert(0, ("GET", "/contents/.github/workflows/" + name, {"content": base64.b64encode(text).decode()}, 200, {}))
+        listing = ("GET", "/contents/.github/workflows?ref=staging", [{"name": n} for n in ("staging.yml", "release.yml")], 200, {})
+        self.gh.routes.insert(0, listing)
+        self.write_config(CONFIG.replace('staging: {branch: staging, url: "https://s.example"}', staging % "  skip_ci: false\n  timeout_min: 30\n"))
+        code, out = self.doctor()
+        self.assertIn("✓ staging chỉ chạy workflow qua dispatch", out)
+        self.assertIn("staging.skip_ci không còn cần", out)
+        self.assertIn("staging.timeout_min không còn cần", out)
+        self.gh.routes[0] = (listing[0], listing[1], [{"name": n} for n in workflows], 200, {})
+        code, out = self.doctor()
+        self.assertIn("lint.yml còn chạy khi push staging (DEV gắn [skip ci] nên chưa chạy hai lần)", out)
 
     def test_platform_labels_must_exist(self):
         self.write_config(CONFIG.replace("qc_manual: qc-manual}", "qc_manual: qc-manual, platform: {web: \"platform:web\"}}"))
@@ -545,11 +575,18 @@ class StagingWorkflows(BoardCase):
   branch: staging
   workflows:
     - file: deploy-staging.yml
-      when: push
-      inputs: {env: staging, debug: false}
-      wipe: wipe_data
-    - file: seed.yml
-      when: need""")
+      inputs: {env: staging}
+    - seed.yml""")
+    DEPLOY = """name: staging
+"on":
+  workflow_dispatch:
+    inputs:
+      env: {type: string, default: staging}
+      backend: {type: boolean, default: true, description: Deploy the backend}
+      apps: {type: boolean, default: true, description: Build the staging apps for testers}
+      wipe_data: {type: boolean, default: false, description: Drop every volume before the rollout}
+jobs: {}
+"""
 
     def setUp(self):
         super().setUp()
@@ -569,6 +606,9 @@ class StagingWorkflows(BoardCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.gh.on("GET", "/commits/staging", {"sha": SHA})
+        import base64
+        for name, text in (("deploy-staging.yml", self.DEPLOY), ("seed.yml", '"on":\n  workflow_dispatch:\n')):
+            self.gh.on("GET", "/contents/.github/workflows/" + name, {"content": base64.b64encode(text.encode()).decode()})
         self.e2e_tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.e2e_tmp.cleanup)
         patcher = mock.patch.object(board, "E2E_TMP", self.e2e_tmp.name)
@@ -591,26 +631,62 @@ class StagingWorkflows(BoardCase):
     def run_(self, id_, branch="staging", status="completed", conclusion="failure", attempt=1, sha=SHA):
         return {"id": id_, "name": "deploy", "head_branch": branch, "status": status, "conclusion": conclusion, "run_attempt": attempt, "head_sha": sha}
 
-    def test_dispatch_declared_workflow_on_staging_with_config_inputs(self):
-        self.gh.on("POST", "/actions/workflows/deploy-staging.yml/dispatches", {}, status=204)
-        code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "deploy-staging.yml")
-        self.assertEqual(code, 0, out)
-        url, body = self.posts()[0]
-        self.assertEqual(body, {"ref": "staging", "inputs": {"env": "staging", "debug": "false", "wipe_data": "false"}})
-        self.assertEqual(json.loads(out)["sha"], SHA)
+    def dispatch_run(self, id_, workflow, at, sha="b" * 40, event="workflow_dispatch"):
+        return dict(self.run_(id_, status="in_progress", conclusion=None, sha=sha), event=event,
+                    path=".github/workflows/" + workflow, created_at=at)
 
-    def test_wipe_turns_on_the_declared_input_when_staging_is_free(self):
+    @staticmethod
+    def stamp(seconds):
+        return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def state_body(self, qc_release):
+        self.gh.on("POST", "issue(number:$n){ body }", {"data": {"repository": {"issue": {
+            "body": "x\n<!-- agentflow:state\nstage: in_qc\nqc_release: %s\n-->" % qc_release}}}})
+
+    def test_agent_turns_on_only_the_inputs_it_asks_for(self):
+        self.gh.on("POST", "/actions/workflows/deploy-staging.yml/dispatches", {}, status=204)
+        for on, apps in (("backend", "false"), ("backend,apps", "true")):
+            with self.subTest(on):
+                code, out = self.run_cmd("dispatch", "acme/app", "--on", on)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(self.dispatches()[-1], {"ref": "staging", "inputs": {"env": "staging", "backend": "true", "apps": apps, "wipe_data": "false"}})
+                self.assertEqual(json.loads(out)["sha"], SHA)
+        self.assertEqual([m["on"] for m in board._marks("acme/app")], [["backend"], ["apps", "backend"]])
+
+    def test_workflows_lists_the_inputs_the_agent_picks_from(self):
+        code, out = self.run_cmd("workflows", "acme/app")
+        self.assertEqual(code, 0, out)
+        rows = [json.loads(line) for line in out.splitlines()]
+        self.assertEqual([(r["workflow"], [i["name"] for i in r["inputs"]]) for r in rows],
+                         [("deploy-staging.yml", ["backend", "apps", "wipe_data"]), ("seed.yml", [])])
+        self.assertEqual([i.get("wipe") for i in rows[0]["inputs"]], [None, None, True])
+
+    def test_an_input_the_agent_may_not_set_is_refused(self):
+        for on in ("ios", "env"):  # not an input · a fixed, non-boolean one
+            with self.subTest(on):
+                code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "deploy-staging.yml", "--on", on)
+                self.assertEqual(code, 1)
+                self.assertIn("không phải ô", out)
+        self.assertEqual(self.posts(), [])
+
+    def test_a_utility_workflow_runs_by_name(self):
+        self.gh.on("POST", "/actions/workflows/seed.yml/dispatches", {}, status=204)
+        code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "seed.yml")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.dispatches(), [{"ref": "staging"}])
+
+    def test_wipe_turns_on_the_input_when_staging_is_free(self):
         self.board_items((7, "In Progress"), (8, "In Review"), (9, "Done"))
         self.gh.on("POST", "/actions/workflows/deploy-staging.yml/dispatches", {}, status=204)
-        code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "deploy-staging.yml", "--wipe", "--issue", "7")
+        code, out = self.run_cmd("dispatch", "acme/app", "--on", "backend,wipe_data", "--issue", "7")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.dispatches()[0]["inputs"]["wipe_data"], "true")
         self.assertTrue(json.loads(out)["wipe"])
-        self.assertTrue(os.path.isfile(board._wipe_marker("acme/app")))
+        self.assertEqual([m["kind"] for m in board._marks("acme/app")], ["wipe"])
 
     def test_wipe_is_refused_while_another_ticket_is_in_qc(self):
         self.board_items((7, "In Progress"), (5, "In QC"))
-        code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "deploy-staging.yml", "--wipe", "--issue", "7")
+        code, out = self.run_cmd("dispatch", "acme/app", "--on", "backend,wipe_data", "--issue", "7")
         self.assertEqual(code, 5, out)
         self.assertEqual([u["issue"] for u in json.loads(out)["busy"]], [5])
         self.assertEqual(self.dispatches(), [])
@@ -622,37 +698,73 @@ class StagingWorkflows(BoardCase):
             os.makedirs(folder)
             with open(os.path.join(folder, "state.json"), "w") as fh:
                 json.dump({"issue": issue, "pid": pid, "done": done}, fh)
-        code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "deploy-staging.yml", "--wipe", "--issue", "7")
+        code, out = self.run_cmd("dispatch", "acme/app", "--on", "wipe_data", "--issue", "7")
         self.assertEqual(code, 5, out)
         self.assertEqual(json.loads(out)["busy"], [{"issue": 4, "why": "đang chạy flow"}])
         self.assertEqual(self.dispatches(), [])
 
-    def test_wipe_needs_a_declared_input_and_the_issue(self):
-        for argv, msg in ((["--workflow", "seed.yml", "--wipe", "--issue", "7"], "không khai wipe"),
-                          (["--workflow", "deploy-staging.yml", "--wipe"], "--wipe cần --issue")):
+    def test_wipe_needs_the_issue_and_never_rides_a_qc_build(self):
+        for argv, msg in ((["--on", "wipe_data"], "cần --issue"), (["--qc", "--on", "apps,wipe_data", "--issue", "7"], "QC không wipe")):
             with self.subTest(msg):
                 code, out = self.run_cmd("dispatch", "acme/app", *argv)
                 self.assertEqual(code, 1)
                 self.assertIn(msg, out)
         self.assertEqual(self.posts(), [])
 
-    def test_cancel_keeps_a_recent_wipe_run(self):
-        old = "b" * 40
-        at = dt.datetime.now(dt.timezone.utc)
-        with open(board._wipe_marker("acme/app"), "w") as fh:
-            json.dump({"workflow": "deploy-staging.yml", "at": at.strftime("%Y-%m-%dT%H:%M:%SZ"), "issue": 7}, fh)
-        created = (at + dt.timedelta(seconds=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        wipe = dict(self.run_(1, status="in_progress", conclusion=None, sha=old), event="workflow_dispatch",
-                    path=".github/workflows/deploy-staging.yml", created_at=created)
-        other = dict(self.run_(2, status="in_progress", conclusion=None, sha=old), event="workflow_dispatch",
-                     path=".github/workflows/seed.yml", created_at=created)
-        self.gh.on("GET", "/actions/runs?branch=staging", {"workflow_runs": [wipe, other]})
+    def test_cancel_keeps_wipe_and_qc_builds_and_leaves_runs_of_people(self):
+        board._mark("acme/app", "deploy-staging.yml", "wipe", self.stamp(0), 7)
+        board._mark("acme/app", "deploy-staging.yml", "qc", self.stamp(-900), 5)
+        board._mark("acme/app", "deploy-staging.yml", "deploy", self.stamp(-1800), 6)
+        runs = [self.dispatch_run(1, "deploy-staging.yml", self.stamp(3)), self.dispatch_run(2, "deploy-staging.yml", self.stamp(-898)),
+                self.dispatch_run(3, "deploy-staging.yml", self.stamp(-1795)), self.dispatch_run(4, "seed.yml", self.stamp(-600)),
+                self.dispatch_run(5, "ci.yml", self.stamp(-60), event="push")]
+        self.gh.on("GET", "/actions/runs?branch=staging", {"workflow_runs": runs})
         self.gh.on("POST", "/cancel", {}, status=202)
         code, out = self.run_cmd("cancel", "acme/app")
         self.assertEqual(code, 0, out)
         res = json.loads(out)
-        self.assertEqual([r["run"] for r in res["cancelled"]], [2])
-        self.assertEqual([r["run"] for r in res["kept"]], [1])
+        self.assertEqual([r["run"] for r in res["cancelled"]], [3, 5])  # a deploy dispatched here, a push run
+        self.assertEqual({r["run"]: r["why"] for r in res["kept"]}, {1: "run có wipe dữ liệu", 2: "bản build cho QC người"})
+
+    def test_a_deploy_supersedes_older_deploys_that_turned_on_no_more(self):
+        board._mark("acme/app", "deploy-staging.yml", "deploy", self.stamp(-600), 6, ["backend"])
+        board._mark("acme/app", "deploy-staging.yml", "deploy", self.stamp(-400), 8, ["apps", "backend"])
+        board._mark("acme/app", "deploy-staging.yml", "qc", self.stamp(-300), 5, ["apps"])
+        self.gh.on("GET", "/actions/runs?branch=staging", {"workflow_runs": [
+            self.dispatch_run(1, "deploy-staging.yml", self.stamp(-598)), self.dispatch_run(2, "deploy-staging.yml", self.stamp(-398)),
+            self.dispatch_run(3, "deploy-staging.yml", self.stamp(-299)), self.dispatch_run(4, "deploy-staging.yml", self.stamp(-100))]})
+        self.gh.on("POST", "/cancel", {}, status=202)
+        self.gh.on("POST", "/dispatches", {}, status=204)
+        code, out = self.run_cmd("dispatch", "acme/app", "--on", "backend")
+        self.assertEqual(code, 0, out)
+        self.assertEqual([r["run"] for r in json.loads(out)["cancelled"]], [1])  # 2 built the apps, 3 is a QC build, 4 a person's
+        self.assertEqual([u.rsplit("/", 2)[-2] for u, _ in self.posts() if u.endswith("/cancel")], ["1"])
+
+    def test_qc_build_turns_on_what_dev_marked_for_the_ticket(self):
+        self.gh.on("POST", "/dispatches", {}, status=204)
+        self.state_body("apps")
+        code, out = self.run_cmd("dispatch", "acme/app", "--qc", "--issue", "7")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out)["dispatched"], [{"workflow": "deploy-staging.yml", "on": ["apps"]}])
+        self.assertEqual(self.dispatches()[0]["inputs"], {"env": "staging", "backend": "false", "apps": "true", "wipe_data": "false"})
+        self.assertEqual([m["kind"] for m in board._marks("acme/app")], ["qc"])
+
+    def test_qc_build_without_qc_release_dispatches_nothing(self):
+        self.state_body("—")
+        code, out = self.run_cmd("dispatch", "acme/app", "--qc", "--issue", "7")
+        self.assertEqual((code, json.loads(out)["dispatched"]), (0, []))
+        self.assertEqual(self.dispatches(), [])
+
+    def test_dev_never_waits_for_a_qc_build_on_the_same_commit(self):
+        board._mark("acme/app", "deploy-staging.yml", "qc", self.stamp(-60), 5, ["apps"])
+        self.gh.on("GET", "/actions/runs?branch=staging", {"workflow_runs": [
+            dict(self.dispatch_run(9, "deploy-staging.yml", self.stamp(-58), sha=SHA), check_suite_id=77)]})
+        self.gh.on("GET", "/check-runs", {"check_runs": [{"name": "Deploy", "status": "completed", "conclusion": "success", "check_suite": {"id": 70}},
+                                                         {"name": "Distribute · ios", "status": "in_progress", "conclusion": None, "check_suite": {"id": 77}}]})
+        self.gh.on("GET", "/status", {"statuses": []})
+        self.gh.on("GET", "/compare/", {"status": "ahead"})
+        code, out = self.run_cmd("checks", "acme/app", "--branch", "staging", "--contains", "abc")
+        self.assertEqual((code, json.loads(out)["state"]), (0, "success"), out)
 
     def test_undeclared_workflow_is_refused(self):
         code, out = self.run_cmd("dispatch", "acme/app", "--workflow", "release-production.yml")
@@ -662,7 +774,7 @@ class StagingWorkflows(BoardCase):
 
     def test_other_repo_is_refused(self):
         self.gh.on("GET", "/repos/evil/app", {"full_name": "evil/app"})
-        code, out = self.run_cmd("dispatch", "evil/app", "--workflow", "deploy-staging.yml")
+        code, out = self.run_cmd("dispatch", "evil/app", "--on", "backend")  # refused before reading anything
         self.assertEqual(code, 1)
         self.assertEqual(self.posts(), [])
 
@@ -688,14 +800,79 @@ class StagingWorkflows(BoardCase):
 
     def test_cancel_only_unfinished_runs_of_older_commits(self):
         old = "b" * 40
+        push = lambda run: dict(run, event="push")  # noqa: E731
         self.gh.on("GET", "/actions/runs?branch=staging", {"workflow_runs": [
-            self.run_(1, status="in_progress", conclusion=None, sha=old), self.run_(2, status="in_progress", conclusion=None),
-            self.run_(3, status="completed", conclusion="success", sha=old)]})
+            push(self.run_(1, status="in_progress", conclusion=None, sha=old)), push(self.run_(2, status="in_progress", conclusion=None)),
+            push(self.run_(3, status="completed", conclusion="success", sha=old))]})
         self.gh.on("POST", "/cancel", {}, status=202)
         code, out = self.run_cmd("cancel", "acme/app")
         self.assertEqual(code, 0, out)
         self.assertEqual([r["run"] for r in json.loads(out)["cancelled"]], [1])
         self.assertEqual([u.rsplit("/", 2)[-2] for u, _ in self.posts()], ["1"])
+
+
+class Groups(BoardCase):
+    """A parent at Ready or later runs as one ticket: its sub-issues ride along, their Status follows it."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        with open(os.path.join(self.tmp.name, "agentflow.yaml"), "w") as fh:
+            fh.write(CONFIG)
+        patcher = mock.patch.object(afconfig, "repo_root", lambda cwd=None: self.tmp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def item(n, status, project=3):
+        return {"id": "PVTI_%d" % n, "project": {"id": "P", "number": project, "owner": {"login": "acme"}}, "status": {"name": status}}
+
+    def node(self, n, group=None, labels=(), subs=(), parent=None, status=None):
+        body = "x\n<!-- agentflow:state\nstage: ready\ngroup: %s\n-->" % group if group else "x"
+        return {"id": "ID%d" % n, "number": n, "state": "OPEN", "body": body, "labels": {"nodes": [{"name": x} for x in labels]},
+                "subIssues": {"nodes": [{"number": x, "state": st} for x, st in subs]},
+                "projectItems": {"nodes": [self.item(n, status)] if status else []}, "parent": parent}
+
+    def issues(self, *nodes):
+        return ({"data": {"repository": {"i%d" % n["number"]: n for n in nodes}}})
+
+    def test_sub_of_a_parent_at_ready_rides_with_it(self):
+        parent = self.node(10, group="#11, #12", subs=((11, "OPEN"), (12, "OPEN"), (13, "OPEN"), (9, "CLOSED")), status="Ready")
+        fresh = self.node(20, subs=((21, "OPEN"), (22, "OPEN")), status="In Progress")
+        container = self.node(30, status="Backlog")
+        rows = [self.node(10, group="#11, #12", subs=((11, "OPEN"), (12, "OPEN"), (13, "OPEN"), (9, "CLOSED")), status="Ready"),
+                self.node(11, parent=parent), self.node(13, parent=parent),  # 13: not in the group SA settled
+                self.node(21, parent=fresh), self.node(22, parent=fresh, labels=("agentflow",)),  # 22: already the agent's own
+                self.node(31, parent=container)]  # a parent in Backlog only gathers work
+        self.gh.on("POST", "fragment G on Issue", self.issues(*rows))
+        code, out = self.run_cmd("group", "acme/app", *sum((["--issue", str(r["number"])] for r in rows), []))
+        self.assertEqual(code, 0, out)
+        got = {r["issue"]: r for r in map(json.loads, out.splitlines())}
+        self.assertEqual((got[10]["subs"], got[10]["group"]), ([11, 12, 13], [11, 12]))
+        self.assertEqual({n: r["in_group"] for n, r in got.items()}, {10: None, 11: 10, 13: None, 21: 20, 22: None, 31: None})
+
+    def test_sync_moves_subs_to_the_parent_status(self):
+        parent = self.node(10, group="11,12,13", status="In QC")
+        subs = [self.node(11, status="In QC"), self.node(12, status="Ready"), self.node(13)]
+        self.gh.on("POST", "fragment G on Issue", [(200, self.issues(parent)), (200, self.issues(*subs))])
+        project = {"id": "P", "title": "T", "url": URL, "shortDescription": "", "closed": False, "items": {"totalCount": 0},
+                   "repositories": {"nodes": []}, "views": {"nodes": []},
+                   "fields": {"nodes": [{"__typename": "ProjectV2SingleSelectField", "id": "F", "name": "Status", "dataType": "SINGLE_SELECT", "options": OPTIONS}]}}
+        self.gh.on("POST", "shortDescription", {"data": {"organization": {"projectV2": project}}})
+        self.gh.on("POST", "addProjectV2ItemById", {"data": {"addProjectV2ItemById": {"item": {"id": "PVTI_13"}}}})
+        self.gh.on("POST", "updateProjectV2ItemFieldValue", {"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "x"}}}})
+        code, out = self.run_cmd("group-sync", "acme/app", "--issue", "10")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out), {"issue": 10, "status": "In QC", "synced": [12, 13], "added": [13]})
+        sets = [json.loads(d)["variables"] for m, u, d in self.gh.calls if d and b"updateProjectV2ItemFieldValue" in d]
+        self.assertEqual([(v["i"], v["o"]) for v in sets], [("PVTI_12", "o4"), ("PVTI_13", "o4")])
+
+    def test_sync_of_a_ticket_without_group_writes_nothing(self):
+        self.gh.on("POST", "fragment G on Issue", self.issues(self.node(10, status="In Review")))
+        code, out = self.run_cmd("group-sync", "acme/app", "--issue", "10")
+        self.assertEqual((code, json.loads(out)["synced"]), (0, []))
+        self.assertEqual(len(self.gh.calls), 1)
 
 
 class PlatformMigrate(BoardCase):

@@ -24,13 +24,22 @@ Auth: the token `gh` uses ($GH_TOKEN, $GITHUB_TOKEN, else `gh auth token`). Neve
   issue-types --org O [--ensure Name|description ...]
   metrics <board-url> [--days N] [--stages k=v,...] [--parked l1,l2,...]
   checks <owner/repo> --branch B --contains SHA [--since ISO] [--wait MIN] [--skip GLOB]   CI of the branch head; one JSON line
-  dispatch <owner/repo> --workflow FILE [--wipe --issue N]   run a workflow of staging.workflows on staging.branch (inputs
-                                            from the config); --wipe turns on its `wipe` input, refused (exit 5) while
-                                            another ticket is In QC or runs flows on this machine
+                                            (queued: its run waits behind another run of its concurrency group)
+  workflows <owner/repo>                    the boolean inputs of each staging.workflows entry, with their descriptions
+  dispatch <owner/repo> [--on IN,..] [--workflow FILE] [--qc] [--issue N]
+                                            run a workflow of staging.workflows on staging.branch: the inputs of --on true,
+                                            every other boolean input false. An older unfinished deploy of the same workflow
+                                            dispatched here that turned on no more is cancelled. --qc: the build for a
+                                            person's QC (inputs = state qc_release), kept from cancel. An input that wipes
+                                            staging data needs --issue, refused (exit 5) while another ticket is In QC or
+                                            runs flows on this machine
   rerun <owner/repo> [--run ID]             re-run failed jobs of runs on staging.branch (default: the runs of its head);
                                             at most MAX_RERUNS re-runs per run
-  cancel <owner/repo> [--run ID]            cancel unfinished runs on staging.branch whose commit is not its head,
-                                            except a run dispatched with --wipe in the last hour
+  cancel <owner/repo> [--run ID]            cancel unfinished runs on staging.branch whose commit is not its head and
+                                            that a push or a deploy dispatched here started; a wipe (1 h) or a QC build
+                                            (3 h) is kept
+  group <owner/repo> --issue N [--issue M ...]   sub-issues of each issue and the parent whose one PR carries it
+  group-sync <owner/repo> --issue N         the sub-issues of group N (state block `group`) take the Status of N
   feedback <owner/repo> --issue N [--issue M ...] [--summary]   people's feedback on the PR of each issue
        (state block `pr`, else the one open PR linked to it); one JSON line per issue
   doctor [--root DIR]                       check agentflow.yaml against GitHub
@@ -578,8 +587,8 @@ CHECK_OK = {"success", "neutral", "skipped"}
 SETTLE_SECONDS = 120
 
 
-def _head_checks(slug, branch, skip=()):
-    """(head sha, state, failed names) over check runs + commit statuses of the branch head. state: success | failure | pending;
+def _head_checks(slug, branch, skip=(), skip_suites=()):
+    """(head sha, state, failed names, registered) over check runs + commit statuses of the branch head. state: success | failure | pending;
     a head without any check yet is pending — the pipeline may not have registered. Checks named by a `skip` glob (a mobile
     release nobody waits for) count for neither; a head where only those ran is success."""
     sha = http("GET", "/repos/%s/commits/%s" % (slug, urllib.parse.quote(branch, safe="")))["sha"]
@@ -592,12 +601,12 @@ def _head_checks(slug, branch, skip=()):
         page += 1
     statuses = http("GET", "/repos/%s/commits/%s/status?per_page=100" % (slug, sha)).get("statuses") or []
     registered = bool(runs or statuses)
-    runs = [r for r in runs if not _skipped(r["name"], skip)]
+    runs = [r for r in runs if not _skipped(r["name"], skip) and (r.get("check_suite") or {}).get("id") not in skip_suites]
     statuses = [s for s in statuses if not _skipped(s["context"], skip)]
     failed = [{"name": r["name"], "url": r.get("html_url")} for r in runs if r["status"] == "completed" and r["conclusion"] not in CHECK_OK]
     failed += [{"name": s["context"], "url": s.get("target_url")} for s in statuses if s["state"] in ("failure", "error")]
     pending = any(r["status"] != "completed" for r in runs) or any(s["state"] == "pending" for s in statuses) or not registered
-    return sha, "failure" if failed else "pending" if pending else "success", failed
+    return sha, "failure" if failed else "pending" if pending else "success", failed, registered
 
 
 def _skipped(name, globs):
@@ -619,17 +628,54 @@ def _too_fresh(since):
     return bool(since) and (dt.datetime.now(dt.timezone.utc) - _iso(since)).total_seconds() < SETTLE_SECONDS
 
 
+RUN_WAITING = {"queued", "pending", "waiting", "requested"}
+
+
+STALL_MINUTES = float(os.environ.get("AGENTFLOW_STALL_MINUTES") or 10)  # no run nor check on the head after this long: the dispatch went nowhere
+
+
+def _head_runs(slug, branch, sha):
+    try:
+        return _branch_runs(slug, branch, sha)
+    except RuntimeError:
+        return None
+
+
+def _qc_suites(slug, branch, sha):
+    """Check suites of the QC builds dispatched here on this commit: DEV never waits for a build a person tests by hand."""
+    try:
+        return {r.get("check_suite_id") for r in _branch_runs(slug, branch, sha) if _run_kind(slug, r) == "qc"}
+    except RuntimeError:
+        return set()
+
+
+def _config_skips(branch):
+    """staging.skip_checks of a config written before 3.11, still honoured on the staging branch."""
+    cfg = afconfig.load_config(afconfig.repo_root() or ".") or {}
+    return afconfig.as_list((cfg.get("staging") or {}).get("skip_checks")) if branch == afconfig.staging_branch(cfg) else []
+
+
 def cmd_checks(a):
     deadline = time.time() + a.wait * 60
+    skip = list(a.skip or ()) + _config_skips(a.branch)
     while True:
-        sha, state, failed = _head_checks(a.slug, a.branch, a.skip or ())
+        head = http("GET", "/repos/%s/commits/%s" % (a.slug, urllib.parse.quote(a.branch, safe="")))["sha"]
+        sha, state, failed, registered = _head_checks(a.slug, a.branch, skip, _qc_suites(a.slug, a.branch, head))
         if state == "success" and _too_fresh(a.since):
             state = "pending"
         contains = _contains(a.slug, a.contains, sha) if a.contains else True
         if state != "pending" or not contains or time.time() >= deadline:
             break
         time.sleep(30)
-    print(json.dumps({"state": state, "sha": sha, "contains": contains, "failed": failed}, ensure_ascii=False))
+    out = {"state": state, "sha": sha, "contains": contains, "failed": failed}
+    if state == "pending":
+        runs = _head_runs(a.slug, a.branch, sha)
+        if runs and any(r.get("status") in RUN_WAITING for r in runs):
+            out["queued"] = True  # waits for its concurrency group, e.g. behind a QC build of the apps
+        late = a.since and (dt.datetime.now(dt.timezone.utc) - _iso(a.since)).total_seconds() > STALL_MINUTES * 60
+        if runs is not None and not runs and not registered and late:
+            out["stalled"] = True  # nothing started: the dispatch went nowhere. A started run ends by its jobs' timeout-minutes
+    print(json.dumps(out, ensure_ascii=False))
 
 
 MAX_RERUNS = 2  # re-runs per workflow run: run_attempt 1 is the push itself
@@ -686,11 +732,53 @@ def _input_value(value):
 
 
 E2E_TMP = os.environ.get("AGENTFLOW_E2E_TMP") or "/tmp"  # where agentflow-e2e keeps its runs
-WIPE_KEEP_SECONDS = 3600  # a wipe run younger than this is not cancelled by another ticket's push
+# A run the agent dispatched, by kind: how long another ticket's push may not cancel it. deploy: superseded by the next
+# deploy at once. wipe: dropping it would drop the wipe silently. qc: the build a person is waiting for to test by hand.
+KEEP_SECONDS = {"deploy": 0, "wipe": 3600, "qc": 3 * 3600}
+MARK_WINDOW = (-60, 180)  # seconds between a dispatch and the run GitHub creates for it
+MARK_TTL = 24 * 3600
 
 
-def _wipe_marker(slug):
-    return os.path.join(E2E_TMP, "af-wipe-%s.json" % re.sub(r"[^\w.-]+", "_", slug.lower()))
+def _marks_file(slug):
+    return os.path.join(E2E_TMP, "af-dispatch-%s.json" % re.sub(r"[^\w.-]+", "_", slug.lower()))
+
+
+def _marks(slug):
+    try:
+        with open(_marks_file(slug), encoding="utf-8") as fh:
+            marks = json.load(fh)
+        return [m for m in marks if (dt.datetime.now(dt.timezone.utc) - _iso(m["at"])).total_seconds() < MARK_TTL]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
+def _mark(slug, workflow, kind, at, issue=None, on=()):
+    marks = _marks(slug) + [{"workflow": workflow, "kind": kind, "at": at, "issue": issue, "on": list(on)}]
+    with open(_marks_file(slug), "w", encoding="utf-8") as fh:
+        json.dump(marks, fh)
+
+
+def _run_mark(slug, run):
+    """The dispatch of this machine that created the run (None = a person, a push, another machine). A run matching several
+    dispatches takes the one kept longest."""
+    if run.get("event") != "workflow_dispatch" or not run.get("created_at"):
+        return None
+    marks = [m for m in _marks(slug) if (run.get("path") or "").endswith("/" + m["workflow"])
+             and MARK_WINDOW[0] <= (_iso(run["created_at"]) - _iso(m["at"])).total_seconds() <= MARK_WINDOW[1]]
+    return max(marks, key=lambda m: KEEP_SECONDS.get(m["kind"], 0)) if marks else None
+
+
+def _run_kind(slug, run):
+    mark = _run_mark(slug, run)
+    return mark["kind"] if mark else None
+
+
+def _kept(slug, run):
+    """Why the run must outlive a newer push, or None."""
+    kind = _run_kind(slug, run)
+    if kind and KEEP_SECONDS.get(kind) and (dt.datetime.now(dt.timezone.utc) - _iso(run["created_at"])).total_seconds() < KEEP_SECONDS[kind]:
+        return {"wipe": "run có wipe dữ liệu", "qc": "bản build cho QC người"}[kind]
+    return None
 
 
 def _running_flows(issue):
@@ -725,52 +813,110 @@ def _staging_users(cfg, slug, issue):
     return users
 
 
+def _qc_release(slug, issue):
+    """Inputs DEV marked in the ticket's state block (`qc_release`) as needed for a person's QC build."""
+    owner, name = slug.split("/", 1)
+    node = (gql("query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ body } } }",
+                o=owner, r=name, n=issue).get("repository") or {}).get("issue")
+    if not node:
+        die("không thấy issue #%d trong %s" % (issue, slug))
+    value = _state_block(node["body"]).get("qc_release") or ""
+    return [p.strip() for p in re.split(r"[,\s]+", value) if p.strip() and p.strip() not in ("—", "-")]
+
+
+def _workflow_inputs(slug, branch, wf):
+    inputs = afconfig.dispatch_inputs(_workflow_text(slug, wf["file"], branch))
+    if inputs is None:
+        die("%s không có trên %s hoặc không có trigger workflow_dispatch" % (wf["file"], branch))
+    return inputs
+
+
+def _pick_workflow(cfg, file, on, slug, branch):
+    """(entry, its inputs): the named workflow, else the one declared workflow, else the first that has every input of `on`."""
+    declared = afconfig.staging_workflows(cfg)
+    if not declared:
+        die("staging.workflows trống — người khai workflow agent được chạy trên staging")
+    if file:
+        hits = [w for w in declared if w["file"] == file]
+        if not hits:
+            die("%s không nằm trong staging.workflows (%s) — người khai trong agentflow.yaml" % (file, ", ".join(w["file"] for w in declared)))
+        return hits[0], _workflow_inputs(slug, branch, hits[0])
+    for wf in declared:
+        inputs = _workflow_inputs(slug, branch, wf)
+        if len(declared) == 1 or set(on) <= set(inputs):
+            return wf, inputs
+    die("không workflow nào trong staging.workflows có đủ ô %s — thêm --workflow" % ", ".join(on))
+
+
+def _supersede(slug, branch, head, workflow, on):
+    """Cancel the unfinished deploys of `workflow` on older staging commits that this machine dispatched and that turned on
+    nothing the new run leaves off: the new run deploys a head that contains theirs. Runs of people, QC builds, wipes and
+    runs that built something this one does not are left alone."""
+    done = []
+    for run in _branch_runs(slug, branch):
+        if run.get("status") not in RUN_ACTIVE or run.get("head_sha") == head or not (run.get("path") or "").endswith("/" + workflow):
+            continue
+        mark = _run_mark(slug, run)
+        if mark and mark["kind"] == "deploy" and set(mark.get("on") or []) <= set(on):
+            http("POST", "/repos/%s/actions/runs/%d/cancel" % (slug, run["id"]), {})
+            done.append({"run": run["id"], "sha": (run.get("head_sha") or "")[:7]})
+    return done
+
+
+def cmd_workflows(a):
+    """The boolean inputs ("ô") of each declared staging workflow, with what each one does: what the agent picks from."""
+    cfg, branch = _staging_scope(a)
+    for wf in afconfig.staging_workflows(cfg):
+        inputs = _workflow_inputs(a.slug, branch, wf)
+        boxes = [{"name": n, "description": i["description"], "default": i["default"], **({"wipe": True} if i["wipe"] else {})}
+                 for n, i in inputs.items() if i["type"] == "boolean" and n not in wf["inputs"]]
+        print(json.dumps({"workflow": wf["file"], "inputs": boxes, "fixed": sorted(set(wf["inputs"]))}, ensure_ascii=False))
+
+
 def cmd_dispatch(a):
     cfg, branch = _staging_scope(a)
-    declared = {w["file"]: w for w in afconfig.staging_workflows(cfg)}
-    if a.workflow not in declared:
-        die("%s không nằm trong staging.workflows (%s) — người khai trong agentflow.yaml" % (a.workflow, ", ".join(declared) or "trống"))
-    wf = declared[a.workflow]
-    if a.wipe and not wf["wipe"]:
-        die("%s không khai wipe trong staging.workflows — không xoá được dữ liệu staging qua workflow này" % a.workflow)
-    if a.wipe and not a.issue:
-        die("--wipe cần --issue <n> (ticket đang deploy)")
-    if a.wipe:
+    on = [p.strip() for p in (a.on or "").split(",") if p.strip()]
+    if a.qc and not a.issue:
+        die("--qc cần --issue <n> (ticket sang In QC)")
+    if a.qc and not on:
+        on = _qc_release(a.slug, a.issue)
+        if not on:
+            print(json.dumps({"dispatched": [], "why": "state qc_release trống — QC tay không cần bản cài mới"}, ensure_ascii=False))
+            return
+    wf, inputs = _pick_workflow(cfg, a.workflow, on, a.slug, branch)
+    boxes = {n: i for n, i in inputs.items() if i["type"] == "boolean" and n not in wf["inputs"]}
+    unknown = [n for n in on if n not in boxes]
+    if unknown:
+        die("%s không phải ô (input boolean) agent bật được của %s — có: %s" % (", ".join(unknown), wf["file"], ", ".join(boxes) or "không ô nào"))
+    wipe = [n for n in on if boxes[n]["wipe"]]
+    if wipe and a.qc:
+        die("bản build cho QC không wipe — người đang test trên staging")
+    if wipe and not a.issue:
+        die("bật %s (xoá dữ liệu staging) cần --issue <n> (ticket đang deploy)" % ", ".join(wipe))
+    if wipe:
         users = _staging_users(cfg, a.slug, a.issue)
         if users:
             print(json.dumps({"refused": "wipe", "busy": users}, ensure_ascii=False))
             sys.exit(5)
-    body = {"ref": branch}
-    inputs = {str(k): _input_value(v) for k, v in wf["inputs"].items()}
-    if wf["wipe"]:
-        inputs[wf["wipe"]] = "true" if a.wipe else "false"
-    if inputs:
-        body["inputs"] = inputs
-    http("POST", "/repos/%s/actions/workflows/%s/dispatches" % (a.slug, urllib.parse.quote(a.workflow, safe="")), body)
-    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if a.wipe:
-        with open(_wipe_marker(a.slug), "w", encoding="utf-8") as fh:
-            json.dump({"workflow": a.workflow, "at": now, "issue": a.issue}, fh)
-    out = {"dispatched": a.workflow, "ref": branch, "sha": _staging_head(a.slug, branch), "at": now}
-    if a.wipe:
+    head = _staging_head(a.slug, branch)
+    out = {"dispatched": [], "ref": branch, "sha": head}
+    if not a.qc:
+        try:
+            cancelled = _supersede(a.slug, branch, head, wf["file"], on)
+            if cancelled:
+                out["cancelled"] = cancelled
+        except RuntimeError as err:  # superseding saves runner time; the release itself must still go out
+            out["cancel_error"] = str(err)[:200]
+    body_inputs = {str(k): _input_value(v) for k, v in wf["inputs"].items()}
+    body_inputs.update({n: "true" if n in on else "false" for n in boxes})
+    body = {"ref": branch, "inputs": body_inputs} if body_inputs else {"ref": branch}
+    http("POST", "/repos/%s/actions/workflows/%s/dispatches" % (a.slug, urllib.parse.quote(wf["file"], safe="")), body)
+    at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _mark(a.slug, wf["file"], "qc" if a.qc else "wipe" if wipe else "deploy", at, a.issue, sorted(on))
+    out.update(dispatched=[{"workflow": wf["file"], "on": sorted(on)}], at=at)
+    if wipe:
         out["wipe"] = True
     print(json.dumps(out, ensure_ascii=False))
-
-
-def _wipe_run(slug, run):
-    """A run dispatched with --wipe on this machine in the last hour: cancelling it would drop the wipe silently."""
-    try:
-        with open(_wipe_marker(slug), encoding="utf-8") as fh:
-            mark = json.load(fh)
-        at = _iso(mark["at"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
-    if not run.get("created_at"):
-        return False
-    dispatched = run.get("event") == "workflow_dispatch"
-    same_workflow = (run.get("path") or "").endswith("/" + mark["workflow"])
-    age = (_iso(run["created_at"]) - at).total_seconds()
-    return dispatched and same_workflow and -60 <= age <= WIPE_KEEP_SECONDS
 
 
 def cmd_rerun(a):
@@ -790,17 +936,21 @@ def cmd_rerun(a):
 
 
 def cmd_cancel(a):
+    """Unfinished runs on older staging commits that a newer one supersedes: those a push started (CI on push) and the
+    deploys dispatched here. `--run` names any run of the staging branch; a wipe or a QC build is kept either way."""
     _, branch = _staging_scope(a)
     head = _staging_head(a.slug, branch)
     runs = _picked_runs(a, branch, lambda: _branch_runs(a.slug, branch))
-    done = []
-    kept = []
+    done, kept = [], []
     for run in runs:
         if run.get("status") not in RUN_ACTIVE or run.get("head_sha") == head:
             continue
         row = {"run": run["id"], "name": run.get("name"), "sha": (run.get("head_sha") or "")[:7]}
-        if not a.run and _wipe_run(a.slug, run):
-            kept.append(dict(row, why="run có wipe dữ liệu"))
+        why = _kept(a.slug, run)
+        if why:
+            kept.append(dict(row, why=why))
+            continue
+        if not a.run and run.get("event") != "push" and _run_kind(a.slug, run) != "deploy":
             continue
         http("POST", "/repos/%s/actions/runs/%d/cancel" % (a.slug, run["id"]), {})
         done.append(row)
@@ -924,6 +1074,105 @@ def cmd_feedback(a):
         sys.exit(2)
 
 
+ITEM_STATUS = ("projectItems(first:20){ nodes{ id project{ id number owner{ ... on Organization{ login } ... on User{ login } } }"
+               " status: fieldValueByName(name:\"Status\"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } } } }")
+GROUP_F = ("fragment G on Issue{ id number state body labels(first:30){ nodes{ name } } subIssues(first:50){ nodes{ number state } }"
+           " %s parent{ number state body labels(first:30){ nodes{ name } } %s } }") % (ITEM_STATUS, ITEM_STATUS)
+ACTIVE_STAGES = ("ready", "in_progress", "in_review", "in_qc", "ready_to_merge")  # a parent here runs as one ticket
+
+
+def _numbers(value):
+    return [int(x) for x in re.findall(r"\d+", value or "")]
+
+
+def _issues(slug, numbers):
+    """{number: issue node of GROUP_F} in one query."""
+    owner, name = slug.split("/", 1)
+    fields = " ".join("i%d: issue(number:%d){ ...G }" % (n, n) for n in numbers)
+    repo = gql("query($o:String!,$r:String!){ repository(owner:$o,name:$r){ %s } } %s" % (fields, GROUP_F), o=owner, r=name)["repository"] or {}
+    return {n: repo.get("i%d" % n) for n in numbers}
+
+
+def _board_item(node, ref):
+    """(item id, Status name) of the issue on the board of agentflow.yaml, or (None, None)."""
+    for item in ((node or {}).get("projectItems") or {}).get("nodes") or []:
+        project = item.get("project") or {}
+        if project.get("number") == ref["number"] and ((project.get("owner") or {}).get("login") or "").lower() == ref["owner"].lower():
+            return item["id"], (item.get("status") or {}).get("name")
+    return None, None
+
+
+def _group_row(cfg, ref, number, node):
+    """subs: open sub-issues · group: sub-issues the ticket works on together (state block, set by SA design) · in_group:
+    the parent whose one PR carries this issue — a parent at Ready or later, which listed it or, not designed yet, while
+    the issue is not the agent's own."""
+    if not node:
+        return {"issue": number, "error": "không thấy issue"}
+    state = _state_block(node["body"])
+    row = {"issue": number, "subs": [x["number"] for x in node["subIssues"]["nodes"] if x["state"] == "OPEN"],
+           "group": _numbers(state.get("group")), "in_group": None}
+    parent = node.get("parent")
+    if not parent or parent["state"] != "OPEN":
+        return row
+    status = cfg.get("board", {}).get("status") or {}
+    active = _board_item(parent, ref)[1] in [status.get(k) for k in ACTIVE_STAGES if status.get(k)]
+    pstate = _state_block(parent["body"])
+    agent = (cfg.get("labels") or {}).get("agent")
+    listed = number in _numbers(pstate.get("group")) if "group" in pstate else agent not in [x["name"] for x in node["labels"]["nodes"]]
+    if active and listed:
+        row["in_group"] = parent["number"]
+    return row
+
+
+def _group_cfg():
+    cfg = afconfig.load_config(afconfig.repo_root() or ".")
+    if not cfg or not (cfg.get("board") or {}).get("url"):
+        die("agentflow.yaml thiếu board.url")
+    return cfg, board_ref(cfg["board"]["url"])
+
+
+def cmd_group(a):
+    cfg, ref = _group_cfg()
+    for number, node in _issues(a.slug, a.issue).items():
+        print(json.dumps(_group_row(cfg, ref, number, node), ensure_ascii=False))
+
+
+def cmd_group_sync(a):
+    """Sub-issues of a group follow the Status of their parent, so the board shows where each one is."""
+    cfg, ref = _group_cfg()
+    parent = _issues(a.slug, [a.issue])[a.issue]
+    if not parent:
+        die("không thấy issue #%d trong %s" % (a.issue, a.slug))
+    subs = _numbers(_state_block(parent["body"]).get("group"))
+    if not subs:
+        print(json.dumps({"issue": a.issue, "synced": []}))
+        return
+    status = _board_item(parent, ref)[1]
+    if not status:
+        die("#%d chưa có Status trên board" % a.issue)
+    proj = get_project(cfg["board"]["url"])
+    fld = field(proj, "Status")
+    option = next((o["id"] for o in fld["options"] if o["name"] == status), None)
+    synced, added = [], []
+    for number, node in _issues(a.slug, subs).items():
+        if not node:
+            continue
+        item, current = _board_item(node, ref)
+        if current == status:
+            continue
+        if not item:
+            item = gql("mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p, contentId:$c}){ item{ id } } }",
+                       p=proj["id"], c=node["id"])["addProjectV2ItemById"]["item"]["id"]
+            added.append(number)
+        gql("mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p, itemId:$i, fieldId:$f,"
+            " value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }", p=proj["id"], i=item, f=fld["id"], o=option)
+        synced.append(number)
+    out = {"issue": a.issue, "status": status, "synced": synced}
+    if added:
+        out["added"] = added
+    print(json.dumps(out, ensure_ascii=False))
+
+
 def _branch_rules(slug, branch):
     try:
         return {r.get("type") for r in http("GET", "/repos/%s/rules/branches/%s" % (slug, urllib.parse.quote(branch, safe="")))}
@@ -932,33 +1181,104 @@ def _branch_rules(slug, branch):
 
 
 def _doctor_staging(slug, branch, ok, warn):
-    sha, state, _ = _head_checks(slug, branch)
+    sha, state, _, _ = _head_checks(slug, branch)
     runs = http("GET", "/repos/%s/commits/%s/check-runs?per_page=1" % (slug, sha)).get("total_count")
     statuses = http("GET", "/repos/%s/commits/%s/status" % (slug, sha)).get("total_count")
     if runs or statuses:
         ok("pipeline staging báo check về commit (head đang %s)" % state)
     else:
-        warn("head staging không có check nào — chưa có pipeline thì mỗi ticket mất trọn staging.timeout_min rồi blocked")
+        warn("head staging không có check nào — chưa có pipeline thì DEV dispatch xong không có gì để chờ và blocked")
     rules = _branch_rules(slug, branch) & {"pull_request", "required_status_checks", "update"}
     if rules:
         warn("ruleset trên %s (%s) có thể chặn SA push trực tiếp" % (branch, ", ".join(sorted(rules))))
 
 
+def _workflow_text(slug, name, branch):
+    path = "/repos/%s/contents/.github/workflows/%s?ref=%s" % (slug, urllib.parse.quote(name, safe=""), urllib.parse.quote(branch, safe=""))
+    try:
+        return base64.b64decode(http("GET", path).get("content") or "").decode(errors="replace")
+    except RuntimeError:
+        return None
+
+
+def _yaml_list(lines, key):
+    """Items of `key:` written inline ([a, b] or a scalar) or as `- a` lines below it; None when the key is absent."""
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\s*)%s\s*:\s*(.*?)\s*(#.*)?$" % re.escape(key), line)
+        if not m:
+            continue
+        if m.group(2):
+            return [x.strip().strip("'\"") for x in m.group(2).strip("[]").split(",") if x.strip()]
+        items = []
+        for below in lines[i + 1:]:
+            item = re.match(r"^\s*-\s*(.+?)\s*(#.*)?$", below)
+            if not item:
+                break
+            items.append(item.group(1).strip("'\""))
+        return items
+    return None
+
+
+def _runs_on_push(text, branch):
+    """Whether a push to `branch` starts the workflow: a top-level `on` with push, not tag-only, whose branch filters
+    let it through. A heuristic over the YAML text, enough for doctor."""
+    lines = (text or "").splitlines()
+    start = next((i for i, l in enumerate(lines) if re.match(r"^[\"']?on[\"']?\s*:", l)), None)
+    if start is None:
+        return False
+    inline = re.sub(r"#.*", "", lines[start].split(":", 1)[1]).strip()
+    if inline:
+        return bool(re.search(r"\bpush\b", inline))
+    block = []
+    for line in lines[start + 1:]:
+        if line.strip() and not line[:1].isspace():
+            break
+        block.append(line)
+    if any(re.match(r"^\s+-\s*push\s*$", l) for l in block):
+        return True
+    at = next((i for i, l in enumerate(block) if re.match(r"^\s+push\s*:", l)), None)
+    if at is None:
+        return False
+    indent = len(block[at]) - len(block[at].lstrip())
+    sub = []
+    for line in block[at + 1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            break
+        sub.append(line)
+    branches, ignore = _yaml_list(sub, "branches"), _yaml_list(sub, "branches-ignore")
+    if branches is None and ignore is None:
+        return _yaml_list(sub, "tags") is None and _yaml_list(sub, "tags-ignore") is None
+    if branches is not None:
+        return any(fnmatch.fnmatch(branch, b) for b in branches)
+    return not any(fnmatch.fnmatch(branch, b) for b in ignore)
+
+
 def _doctor_workflows(slug, branch, workflows, ok, fail):
     """Each declared workflow must exist on the staging branch and accept workflow_dispatch, or DEV's dispatch fails."""
     for wf in workflows:
-        path = "/repos/%s/contents/.github/workflows/%s?ref=%s" % (slug, urllib.parse.quote(wf["file"], safe=""), urllib.parse.quote(branch, safe=""))
-        try:
-            text = base64.b64decode(http("GET", path).get("content") or "").decode(errors="replace")
-        except RuntimeError:
-            fail("staging.workflows: %s không có trên nhánh %s" % (wf["file"], branch))
+        inputs = afconfig.dispatch_inputs(_workflow_text(slug, wf["file"], branch))
+        if inputs is None:
+            fail("staging.workflows: %s không có trên %s hoặc không có trigger workflow_dispatch — agent không chạy được" % (wf["file"], branch))
             continue
-        if "workflow_dispatch" in text:
-            ok("workflow %s (%s) dispatch được trên %s" % (wf["file"], wf["when"], branch))
-        else:
-            fail("staging.workflows: %s không có trigger workflow_dispatch — DEV không chạy được" % wf["file"])
-        if wf["wipe"] and not re.search(r"^\s+%s\s*:" % re.escape(wf["wipe"]), text, re.M):
-            fail("staging.workflows: %s không có input %s (wipe) — DEV dispatch --wipe sẽ lỗi" % (wf["file"], wf["wipe"]))
+        boxes = ["%s%s" % (n, " (xoá dữ liệu)" if i["wipe"] else "") for n, i in inputs.items() if i["type"] == "boolean" and n not in wf["inputs"]]
+        ok("workflow %s dispatch được trên %s — ô agent chọn: %s" % (wf["file"], branch, ", ".join(boxes) or "không có"))
+
+
+def _doctor_push(slug, branch, cfg, ok, warn):
+    """Staging runs its pipelines only by dispatch: which workflows still start on a push to it, and whether the [skip ci]
+    of DEV's merge commit still does anything."""
+    try:
+        listing = http("GET", "/repos/%s/contents/.github/workflows?ref=%s" % (slug, urllib.parse.quote(branch, safe="")))
+    except RuntimeError:
+        return
+    names = [f["name"] for f in listing if isinstance(f, dict) and str(f.get("name")).endswith((".yml", ".yaml"))] if isinstance(listing, list) else []
+    on_push = [n for n in names if _runs_on_push(_workflow_text(slug, n, branch), branch)]
+    if on_push and afconfig.staging_skip_ci(cfg):
+        warn("%s còn chạy khi push %s (DEV gắn [skip ci] nên chưa chạy hai lần) — bỏ trigger push để staging chỉ chạy qua dispatch" % (", ".join(on_push), branch))
+    elif on_push:
+        ok("pipeline staging chạy khi push (%s)" % ", ".join(on_push))
+    else:
+        ok("staging chỉ chạy workflow qua dispatch")
 
 
 def _doctor_base(slug, base, ok, warn):
@@ -1171,9 +1491,7 @@ def cmd_doctor(a):
             ok("staging branch %s" % stag)
             _doctor_staging(canonical, stag, ok, warn)
             _doctor_workflows(canonical, stag, afconfig.staging_workflows(cfg), ok, fail)
-            if (cfg.get("staging") or {}).get("skip_ci") is True and not afconfig.staging_skip_ci(cfg):
-                warn("staging.skip_ci: true chưa có tác dụng — chưa khai workflow when: push để DEV dispatch, nên push staging "
-                     "vẫn để CI tự chạy")
+            _doctor_push(canonical, stag, cfg, ok, warn)
         if base:
             _doctor_base(canonical, base, ok, warn)
         if not (cfg.get("staging") or {}).get("url"):
@@ -1230,11 +1548,15 @@ def main():
     s.add_argument("--wait", type=float, default=0, help="số phút chờ thêm khi còn pending")
     s.add_argument("--since", help="deploy_at: check xanh trong 2 phút đầu vẫn tính là pending")
     s.add_argument("--skip", action="append", help="glob tên check không chờ (staging.skip_checks, vd release mobile); lặp được")
-    s = sub.add_parser("dispatch"); s.add_argument("slug"); s.add_argument("--workflow", required=True, help="tên file trong staging.workflows")
-    s.add_argument("--wipe", action="store_true", help="bật input wipe của workflow (xoá dữ liệu staging); từ chối khi ticket khác đang dùng staging")
-    s.add_argument("--issue", type=int, help="ticket đang deploy (bắt buộc với --wipe)")
+    s = sub.add_parser("workflows"); s.add_argument("slug")
+    s = sub.add_parser("dispatch"); s.add_argument("slug"); s.add_argument("--workflow", help="tên file trong staging.workflows (một file thì bỏ)")
+    s.add_argument("--on", help="ô (input boolean) cần bật, vd backend,web — ô boolean còn lại gửi false")
+    s.add_argument("--qc", action="store_true", help="bản build cho QC người (orchestrator, ticket sang In QC): --on mặc định = state qc_release")
+    s.add_argument("--issue", type=int, help="ticket đang deploy (bắt buộc khi bật ô xoá dữ liệu, và với --qc)")
     for name in ("rerun", "cancel"):
         s = sub.add_parser(name); s.add_argument("slug"); s.add_argument("--run", type=int, help="id run trên nhánh staging")
+    s = sub.add_parser("group"); s.add_argument("slug"); s.add_argument("--issue", type=int, action="append", required=True)
+    s = sub.add_parser("group-sync"); s.add_argument("slug"); s.add_argument("--issue", type=int, required=True)
     s = sub.add_parser("feedback"); s.add_argument("slug"); s.add_argument("--issue", type=int, action="append", required=True)
     s.add_argument("--summary", action="store_true", help="một dòng mỗi issue: pr + số mục chờ DEV")
     s = sub.add_parser("doctor"); s.add_argument("--root")
@@ -1242,9 +1564,9 @@ def main():
     a = p.parse_args()
     handler = {"whoami": cmd_whoami, "inspect": cmd_inspect, "items": cmd_items, "status-plan": cmd_status_plan,
                "status-apply": cmd_status_apply, "ensure-field": cmd_ensure_field, "create": cmd_create,
-               "platform-migrate": cmd_platform_migrate, "dispatch": cmd_dispatch, "rerun": cmd_rerun, "cancel": cmd_cancel,
+               "platform-migrate": cmd_platform_migrate, "workflows": cmd_workflows, "dispatch": cmd_dispatch, "rerun": cmd_rerun, "cancel": cmd_cancel,
                "labels": cmd_labels, "repo": cmd_repo, "milestones": cmd_milestones, "issue-types": cmd_issue_types, "metrics": cmd_metrics, "checks": cmd_checks,
-               "feedback": cmd_feedback, "doctor": cmd_doctor, "preflight": cmd_preflight}[a.cmd]
+               "feedback": cmd_feedback, "group": cmd_group, "group-sync": cmd_group_sync, "doctor": cmd_doctor, "preflight": cmd_preflight}[a.cmd]
     try:
         handler(a)
     except RuntimeError as err:

@@ -55,7 +55,7 @@ surfaces:
     e2e_dir: "e2e"
 forbidden: []
 design: {figma: false, repo: []}
-staging: {branch: staging, url: "", build: "", notes: "", timeout_min: %(timeout)d, skip_checks: ["distribute-*"]}
+staging: {branch: staging, url: "", notes: "", skip_checks: ["distribute-*"]}
 clarify: {task: auto, implement: auto}  # no one answers a question under claude -p
 people: {po: [acme-po], qc: [acme-qc], reviewers: [acme-rev]}
 run: {parallel: %(parallel)d, max_tasks: %(tasks)d, max_review_rounds: 3, max_qc_rounds: 2, max_test_rounds: 3, models: {dev: {default: %(model)s}, sa: %(model)s}}
@@ -77,7 +77,7 @@ def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
-def make_repo(base, model, timeout=30, parallel=1, tasks=1):
+def make_repo(base, model, parallel=1, tasks=1):
     bare = os.path.join(base, "origin.git")
     repo = os.path.join(base, "app")
     git(base, "init", "-q", "--bare", "-b", "master", bare)
@@ -90,7 +90,7 @@ def make_repo(base, model, timeout=30, parallel=1, tasks=1):
     with open(os.path.join(repo, ".gitignore"), "w") as fh:
         fh.write(".claude/settings.local.json\n.claude/worktrees/\n__pycache__/\n")
     with open(os.path.join(repo, "agentflow.yaml"), "w") as fh:
-        fh.write(AGENTFLOW_YAML % {"model": model, "timeout": timeout, "parallel": parallel, "tasks": tasks})
+        fh.write(AGENTFLOW_YAML % {"model": model, "parallel": parallel, "tasks": tasks})
     with open(os.path.join(repo, "calc.py"), "w") as fh:
         fh.write("def add(a, b):\n    return a + b\n")
     with open(os.path.join(repo, "test_calc.py"), "w") as fh:
@@ -274,6 +274,8 @@ def serve_checks(bare, scenario, seeded_head, state_path):
                 if rest.endswith("/check-runs"):
                     runs = runs_for(rest.split("/")[1])
                     body, code = {"total_count": len(runs), "check_runs": runs}, 200
+                elif rest.startswith("actions/runs"):  # no Actions run: the staging pipeline of these scenarios only reports checks
+                    body, code = {"total_count": 0, "workflow_runs": []}, 200
                 elif rest.endswith("/status"):
                     body, code = {"total_count": 0, "statuses": []}, 200
                 elif rest.startswith("commits/"):
@@ -477,7 +479,7 @@ def main():
     base = os.path.realpath(tempfile.mkdtemp(prefix="af-e2e-"))
     state_path = os.path.join(base, "github.json")
     multi = a.scenario == "multi"
-    repo, bare = make_repo(base, a.model, 2 if a.scenario == "pipeline-timeout" else 30, a.parallel or (2 if multi else 1), 3 if multi else 1)  # DEV counts the timeout from when it starts waiting
+    repo, bare = make_repo(base, a.model, a.parallel or (2 if multi else 1), 3 if multi else 1)
     master_before = git(bare, "rev-parse", "master")
     state = {"status": "Ready", "status_history": [], "calls": [], "pr": None,
              "issue": {"number": 42, "title": "Thêm hàm chia vào calc.py", "state": "open", "body": ISSUE_BODY, "labels": ["Feature"], "assignees": [], "comments": []}}
@@ -489,7 +491,7 @@ def main():
     plugin = make_plugin(base, state_path, bare)
     server = serve_checks(bare, a.scenario, git(bare, "rev-parse", "staging"), state_path)
     env = dict(os.environ, GITHUB_TOKEN="fake-e2e", GH_TOKEN="fake-e2e", AGENTFLOW_JOURNAL=os.path.join(base, "journal.jsonl"),
-               AGENTFLOW_GITHUB_API="http://127.0.0.1:%d" % server.server_address[1])
+               AGENTFLOW_GITHUB_API="http://127.0.0.1:%d" % server.server_address[1], AGENTFLOW_STALL_MINUTES="2")  # pipeline-timeout
     log = os.path.join(base, "claude.jsonl")
     with open(log, "w") as out:
         try:

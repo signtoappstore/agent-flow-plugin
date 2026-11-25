@@ -58,7 +58,7 @@ Surface đã dùng Playwright, Cypress, Flutter `integration_test`, Detox… tro
 
 ## Kiểm chứng lại (mục của PR)
 
-- **QC tay** (chặn merge, QC người làm trên staging): `- [ ]` mỗi case `tay` và mỗi case không chạy được (thiếu thiết bị, công cụ, dữ liệu thật): bước + kỳ vọng + môi trường (`staging.url` / build theo `staging.build`) + link frame design nếu có.
+- **QC tay** (chặn merge, QC người làm trên staging): `- [ ]` mỗi case `tay` và mỗi case không chạy được (thiếu thiết bị, công cụ, dữ liệu thật): bước + kỳ vọng + môi trường (`staging.url` / app bản `qc_release`) + link frame design nếu có.
 - **Đề xuất kiểm chứng thêm** (không chặn): regression ở vùng rủi ro SA nêu và phần diff thật chạm mà flow không phủ, rủi ro còn lại, góp ý UX. Mỗi dòng: vùng → vì sao → cách kiểm.
 - Rework sau khi QC người báo fail (`qc_round` > 0) ⇒ QC tay **luôn** có `- [ ] Xác nhận lại lỗi QC đã báo: <bước của họ>`. Mục QC tay đã có chỉ bỏ khi flow phủ đúng case đó (ghi lý do).
 - Không có mục QC tay ⇒ ghi `QC tay: —`.

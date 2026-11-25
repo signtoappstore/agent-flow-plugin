@@ -83,24 +83,10 @@ design:
 # Nhánh chỉ để build và test: DEV merge dồn nhánh ticket vào đây rồi chạy flow, không bao giờ merge ngược về PR hay master.
 staging:
   branch: "staging"            # BẮT BUỘC — phải tồn tại trên origin, khác git.base
-  url: ""                      # URL API/web của môi trường staging. Trống ⇒ test case API/web thành mục QC tay
-  build: ""                    # cách lấy bản build cho mobile/QC người, vd "artifact APK của workflow staging-release"
-  notes: ""                    # app id, tài khoản/dữ liệu test: path secret folder của project (gitignored), vd "secret/staging/" — agent đọc file trong đó
-  timeout_min: 30              # pipeline quá thời gian này ⇒ blocked, báo người
-  skip_checks: []              # glob tên check DEV không chờ — release mobile, vd ["distribute-mobile*", "testflight*"]
-  skip_ci: true                # merge commit DEV push lên staging có [skip ci] ⇒ workflow on: push không tự chạy, chỉ chạy
-                               # qua dispatch bên dưới. false = để CI tự chạy khi push. Thiếu key ⇒ true
-  # Workflow DEV tự dispatch trên staging.branch, không hỏi người: ref luôn là staging, inputs chỉ lấy ở đây. Rerun job fail
-  # (≤ 2 lần mỗi run) và cancel run cũ áp cho mọi run của nhánh staging, không cần khai. Không khai workflow deploy production,
-  # không khai workflow build/distribute mobile (mặc định không build CI mobile — người chạy tay khi cần; flow mobile dùng
-  # bản DEV build trên máy, surfaces.<key>.install).
-  workflows: []
-  #  - file: "deploy-staging.yml"
-  #    when: push               # push = dispatch sau mỗi lần DEV push staging
-  #                             # need = chỉ khi cần, vd chạy seed/migration riêng
-  #    inputs: { env: staging } # tuỳ chọn — giá trị cố định
-  #    wipe: "wipe_data"        # tuỳ chọn — input boolean xoá dữ liệu staging. DEV tự bật khi cần (migration không tương
-  #                             # thích, seed đổi, dữ liệu bẩn làm flow sai); bị từ chối khi ticket khác đang In QC/chạy flow
+  url: ""                      # web/API staging cho flow web, test API. Trống ⇒ các case đó thành mục QC tay
+  notes: ""                    # secret folder có app id, tài khoản test (gitignored), vd "secret/staging/"
+  workflows: []                # workflow agent được chạy trên staging (workflow_dispatch), vd [staging.yml]. Agent đọc ô
+                               # (input boolean + mô tả) của workflow, tự chọn theo task: build gì, có xoá dữ liệu không
 
 # ── LÀM RÕ YÊU CẦU ───────────────────────────────────────────────────────────
 # auto = agent tự phân tích, chọn phương án tốt nhất và hợp nhất, ghi quyết định + căn cứ để người soát sau.

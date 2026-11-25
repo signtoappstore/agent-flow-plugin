@@ -189,8 +189,16 @@ def _gql_comment(c):
 
 
 def graphql(query, root, variables=None):
-    """The two queries of `agentflow-board feedback`, answered from the same state the MCP side writes."""
+    """The queries of `agentflow-board feedback` and `group`, answered from the same state the MCP side writes."""
     variables = variables or {}
+    if "fragment G on Issue" in query:  # agentflow-board group / group-sync: the seeded tickets have no parent and no sub-issue
+        nodes = {}
+        for n in map(int, re.findall(r"i(\d+): issue\(number:", query)):
+            t = ticket(root, issue=n)
+            nodes["i%d" % n] = {"id": "I_%d" % n, "number": n, "state": "OPEN", "body": t["issue"]["body"],
+                                "labels": {"nodes": [{"name": x["name"] if isinstance(x, dict) else x} for x in t["issue"].get("labels", [])]},
+                                "subIssues": {"nodes": []}, "projectItems": {"nodes": []}, "parent": None}
+        return {"repository": nodes}
     st = ticket(root, issue=variables.get("n"), pr=variables.get("m"))
     pr = st.get("pr")
     node = None
