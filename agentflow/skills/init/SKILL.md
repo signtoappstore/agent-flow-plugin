@@ -35,7 +35,7 @@ Chưa `ignored` + `untracked` → **dừng**.
 ## 3. Token + quyền
 
 `agentflow-board whoami`. Token là token của `gh`: `$GH_TOKEN` → `$GITHUB_TOKEN` → `gh auth token` (script và MCP dùng chung — `scripts/mcp-headers.py` là `headersHelper` của MCP). Plugin không lưu token vào file nào.
-Bắt buộc **full scope** (mọi scope classic token): `whoami` exit 1 ⇒ **dừng** tới khi đủ.
+Bắt buộc **full scope** (mọi scope classic token trừ `delete_repo`, `admin:enterprise`): `whoami` exit 1 ⇒ **dừng** tới khi đủ.
 - Người tự chạy `! <lệnh gh auth>` lỗi in ra, rồi chạy lại `whoami`. Không đọc/in/ghi token hộ — guard chặn `gh auth token`.
 - Refresh vẫn thiếu, hoặc token fine-grained → người tạo classic token theo link FAIL (ô tick sẵn), nạp ở terminal riêng: `gh auth login -h github.com --with-token`.
 - `agentflow-settings has GITHUB_TOKEN` exit 0 (token cũ từ bản < 2.2) → đề nghị `agentflow-settings unset GITHUB_TOKEN` (tương tự `GH_TOKEN`): biến trong `env` được Claude Code đưa vào session và thắng tài khoản `gh`. Người muốn giữ thì để, doctor chỉ báo ⚠.

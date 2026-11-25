@@ -80,10 +80,11 @@ STATUS_DESC = {
     "ready_to_merge": "Review + QC đã pass, PR đã undraft. Người approve + merge. Muốn sửa: Request changes trên PR.",
     "done": "PR đã merge, issue đã đóng.",
 }
-# Token phải có mọi scope top-level của classic token (người dùng chọn 2026-11-12, DESIGN-NOTES.md). X-OAuth-Scopes trả
-# danh sách đã chuẩn hoá: scope cha thay cho scope con, nên so từng tên top-level là đủ.
+# Token phải có mọi scope top-level của classic token (người dùng chọn 2026-11-12, DESIGN-NOTES.md), trừ delete_repo và
+# admin:enterprise (bỏ 2026-11-25: plugin không dùng, guard chặn xoá repo). X-OAuth-Scopes trả danh sách đã chuẩn hoá:
+# scope cha thay cho scope con, nên so từng tên top-level là đủ.
 FULL_SCOPES = ("repo", "workflow", "write:packages", "delete:packages", "admin:org", "admin:public_key", "admin:repo_hook",
-               "admin:org_hook", "gist", "notifications", "user", "delete_repo", "write:discussion", "admin:enterprise",
+               "admin:org_hook", "gist", "notifications", "user", "write:discussion",
                "audit_log", "codespace", "copilot", "write:network_configurations", "project", "admin:gpg_key",
                "admin:ssh_signing_key")
 CLASSIC_TOKEN_URL = "https://github.com/settings/tokens/new?description=agentflow&scopes=" + ",".join(FULL_SCOPES)

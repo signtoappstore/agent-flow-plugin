@@ -474,8 +474,10 @@ class Doctor(BoardCase):
         code, out = self.doctor()
         self.assertEqual(code, 1)
         self.assertIn("✗ thiếu scope", out)
-        self.assertIn("delete_repo", out)
-        self.assertIn("admin:enterprise", out)
+        self.assertIn("admin:org", out)
+        self.assertIn("codespace", out)
+        self.assertNotIn("delete_repo", out, "plugin không đòi delete_repo")
+        self.assertNotIn("admin:enterprise", out, "plugin không đòi admin:enterprise")
         self.assertIn("board T", out, "có scope project thì vẫn đọc tiếp board để báo lỗi khác")
 
     def test_token_without_scope_list_fails(self):
@@ -1177,6 +1179,11 @@ class Misc(BoardCase):
         code, out = self.run_cmd("whoami")
         self.assertEqual(code, 0, out)
         self.assertIn("OK token đủ full scope", out)
+
+    def test_delete_repo_and_admin_enterprise_are_not_required(self):
+        for scope in ("delete_repo", "admin:enterprise"):
+            self.assertNotIn(scope, board.FULL_SCOPES)
+            self.assertNotIn(scope, board.CLASSIC_TOKEN_URL, "link tạo classic token không tick sẵn %s" % scope)
 
     def test_bad_board_url(self):
         code, _ = self.run_cmd("inspect", "https://github.com/acme/app")

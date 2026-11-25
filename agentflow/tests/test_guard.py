@@ -106,7 +106,7 @@ API = [
     "gh api -X PUT repos/o/r/contents/a.txt -f branch=master", 'curl -X PUT -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/o/r/pulls/1/merge',
     'curl -X POST https://api.github.com/graphql -d \'{"query":"mutation{mergePullRequest}"}\'', "curl -d x https://api.github.com/repos/o/r/merges",
     "wget --method=PUT https://api.github.com/repos/o/r/pulls/1/merge", "gh auth token", "gh auth status --show-token", "git credential fill",
-    # The token has full scope (delete_repo, delete:packages): deleting a repo or package must stay a human act.
+    # The token has delete:packages and may hold delete_repo: deleting a repo or package must stay a human act.
     "gh repo delete o/r --yes", "gh -R o/r repo delete --yes", "gh api -X DELETE repos/o/r", "gh api --method DELETE /repos/{owner}/{repo}",
     "curl -X DELETE -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/o/r", "gh api -X DELETE orgs/o/packages/npm/app",
     "gh api -X DELETE /user/packages/container/app/versions/1", 'gh api graphql -f query="mutation{deletePackageVersion(input:{packageVersionId:\\"x\\"}){success}}"',
