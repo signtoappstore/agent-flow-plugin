@@ -903,6 +903,32 @@ class Groups(BoardCase):
         self.assertEqual((got[10]["subs"], got[10]["group"]), ([11, 12, 13], [11, 12]))
         self.assertEqual({n: r["in_group"] for n, r in got.items()}, {10: None, 11: 10, 13: None, 21: 20, 22: None, 31: None})
 
+    def test_subs_tells_which_sub_can_still_join_one_pr(self):
+        parent = self.node(10, subs=((11, "OPEN"), (12, "OPEN"), (13, "OPEN"), (14, "OPEN"), (15, "OPEN"), (9, "CLOSED")), status="Backlog")
+        self.gh.on("POST", "fragment G on Issue", self.issues(parent))
+
+        def sub(n, labels=(), prs=(), status=None):
+            node = self.node(n, labels=labels, status=status)
+            node["closedByPullRequestsReferences"] = {"nodes": [dict(pr, repository={"nameWithOwner": "acme/app"},
+                                                                     headRepository={"nameWithOwner": repo}) for pr, repo in prs]}
+            return node
+        fork = ({"number": 70, "state": "OPEN"}, "someone/app")  # a fork's PR does not take the sub
+        subs = [sub(11, status="Backlog", prs=(fork,)), sub(12, labels=("agentflow",), status="Ready"),
+                sub(13, prs=(({"number": 57, "state": "OPEN"}, "acme/app"),), status="Ready"), sub(14, status="In Progress"), sub(15)]
+        self.gh.on("POST", "fragment S on Issue", self.issues(*subs))
+        code, out = self.run_cmd("group", "acme/app", "--issue", "10", "--subs")
+        self.assertEqual(code, 0, out)
+        row = json.loads(out)
+        self.assertEqual(row["free"], [11, 15])
+        self.assertEqual(row["taken"], [{"issue": 12, "why": "đang do agent làm riêng"}, {"issue": 13, "why": "có PR riêng #57"},
+                                        {"issue": 14, "why": "đang ở In Progress"}])
+
+    def test_group_without_subs_flag_reads_once(self):
+        self.gh.on("POST", "fragment G on Issue", self.issues(self.node(10, subs=((11, "OPEN"),), status="Backlog")))
+        code, out = self.run_cmd("group", "acme/app", "--issue", "10")
+        self.assertEqual((code, "free" in json.loads(out)), (0, False))
+        self.assertEqual(len(self.gh.calls), 1)
+
     def test_sync_moves_subs_to_the_parent_status(self):
         parent = self.node(10, group="11,12,13", status="In QC")
         subs = [self.node(11, status="In QC"), self.node(12, status="Ready"), self.node(13)]

@@ -41,7 +41,8 @@ Auth: the token `gh` uses ($GH_TOKEN, $GITHUB_TOKEN, else `gh auth token`). Neve
   cancel <owner/repo> [--run ID]            cancel unfinished runs on staging.branch whose commit is not its head and
                                             that a push or a deploy dispatched here started; a wipe (1 h) or a QC build
                                             (3 h) is kept
-  group <owner/repo> --issue N [--issue M ...]   sub-issues of each issue and the parent whose one PR carries it
+  group <owner/repo> --issue N [--issue M ...] [--subs]   sub-issues of each issue and the parent whose one PR carries it;
+                                            --subs: which open subs can still join one PR (`free`) and which not (`taken`)
   group-sync <owner/repo> --issue N         the sub-issues of group N (state block `group`) take the Status of N
   feedback <owner/repo> --issue N [--issue M ...] [--summary]   people's feedback on the PR of each issue
        (state block `pr`, else the one open PR linked to it); one JSON line per issue
@@ -1167,10 +1168,60 @@ def _group_cfg():
     return cfg, board_ref(cfg["board"]["url"])
 
 
+SUB_F = ("fragment S on Issue{ number state labels(first:30){ nodes{ name } }"
+         " closedByPullRequestsReferences(first:10, includeClosedPrs:false){ nodes{ number state repository{ nameWithOwner }"
+         " headRepository{ nameWithOwner } } } %s }") % ITEM_STATUS
+JOINABLE_STAGES = ("backlog", "ready")  # a sub still here has not been started on its own
+
+
+def _sub_nodes(slug, numbers):
+    owner, name = slug.split("/", 1)
+    fields = " ".join("i%d: issue(number:%d){ ...S }" % (n, n) for n in numbers)
+    repo = gql("query($o:String!,$r:String!){ repository(owner:$o,name:$r){ %s } } %s" % (fields, SUB_F), o=owner, r=name)["repository"] or {}
+    return {n: repo.get("i%d" % n) for n in numbers}
+
+
+def _taken_why(cfg, ref, slug, node):
+    """Why an open sub cannot join its parent's one PR (None = it can): the agent already works it on its own, an open
+    PR of its own closes it, or its card already left Ready."""
+    agent = (cfg.get("labels") or {}).get("agent")
+    if agent and agent in [x["name"] for x in node["labels"]["nodes"]]:
+        return "đang do agent làm riêng"
+    for pr in node["closedByPullRequestsReferences"]["nodes"]:
+        same_repo = all(((pr.get(k) or {}).get("nameWithOwner") or "").lower() == slug.lower() for k in ("repository", "headRepository"))
+        if pr.get("state") == "OPEN" and same_repo:
+            return "có PR riêng #%d" % pr["number"]
+    status = _board_item(node, ref)[1]
+    joinable = [(cfg.get("board", {}).get("status") or {}).get(k) for k in JOINABLE_STAGES]
+    if status and status not in joinable:
+        return "đang ở %s" % status
+    return None
+
+
+def _with_subs(cfg, ref, slug, rows):
+    """free: open sub-issues that can still join the parent's one PR · taken: the others, with the reason."""
+    wanted = sorted({n for row in rows for n in row.get("subs") or []})
+    nodes = _sub_nodes(slug, wanted) if wanted else {}
+    for row in rows:
+        if "subs" not in row:
+            continue
+        row["free"], row["taken"] = [], []
+        for n in row["subs"]:
+            why = _taken_why(cfg, ref, slug, nodes[n]) if nodes.get(n) else "không đọc được"
+            if why:
+                row["taken"].append({"issue": n, "why": why})
+            else:
+                row["free"].append(n)
+    return rows
+
+
 def cmd_group(a):
     cfg, ref = _group_cfg()
-    for number, node in _issues(a.slug, a.issue).items():
-        print(json.dumps(_group_row(cfg, ref, number, node), ensure_ascii=False))
+    rows = [_group_row(cfg, ref, number, node) for number, node in _issues(a.slug, a.issue).items()]
+    if a.subs:
+        rows = _with_subs(cfg, ref, a.slug, rows)
+    for row in rows:
+        print(json.dumps(row, ensure_ascii=False))
 
 
 PR_SECTIONS = ("Lệch thiết kế", "Test tự động", "Kiểm chứng lại", "QC tay")  # dev.md §6: always in the PR body
@@ -1684,6 +1735,7 @@ def main():
     for name in ("rerun", "cancel"):
         s = sub.add_parser(name); s.add_argument("slug"); s.add_argument("--run", type=int, help="id run trên nhánh staging")
     s = sub.add_parser("group"); s.add_argument("slug"); s.add_argument("--issue", type=int, action="append", required=True)
+    s.add_argument("--subs", action="store_true")
     s = sub.add_parser("group-sync"); s.add_argument("slug"); s.add_argument("--issue", type=int, required=True)
     s = sub.add_parser("feedback"); s.add_argument("slug"); s.add_argument("--issue", type=int, action="append", required=True)
     s.add_argument("--summary", action="store_true", help="một dòng mỗi issue: pr + số mục chờ DEV")

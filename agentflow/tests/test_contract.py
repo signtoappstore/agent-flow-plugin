@@ -64,11 +64,14 @@ import afconfig  # noqa: E402
 # adds ~2.3k to audit-ux.md, ~0.5k to audit.md, ~0.35k to product/arch, ~0.6k to the command. The counting is in tested
 # code (`agentflow-audit ready`, the grade check in `findings`); no ticket spawn reads these files, and the qa spawn only
 # grows by audit.md's ~0.5k.
+# 3.15 also lets `/do #<parent>` offer one PR for every sub (SYS grouped, `agentflow-board group --subs` picks the
+# subs in tested code) and orders a group: code every sub, then one automation lượt: ~1.3k to the /do command (read
+# only by the orchestrator), ~0.3k each to protocol, dispatch, sa.md and dev.md.
 BUDGETS = {
-    "agents/sa.md": 11900, "agents/dev.md": 14650,
-    "references/protocol.md": 14450, "references/dispatch.md": 10700, "references/design.md": 2600, "references/automation.md": 7850,
+    "agents/sa.md": 12150, "agents/dev.md": 14900,
+    "references/protocol.md": 14700, "references/dispatch.md": 11050, "references/design.md": 2600, "references/automation.md": 7850,
     "references/engineering.md": 3250, "references/clarify.md": 6650,
-    "skills/init/SKILL.md": 11300, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 3000, "skills/doctor/SKILL.md": 2000,
+    "skills/init/SKILL.md": 11300, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 4300, "skills/doctor/SKILL.md": 2000,
     "skills/run/SKILL.md": 2450, "skills/status/SKILL.md": 3000, "skills/task/SKILL.md": 10150, "skills/init/references/board-setup.md": 5550,
     "agents/audit.md": 6450, "references/audit-qa.md": 6750, "references/audit-arch.md": 4800, "references/audit-product.md": 3850,
     "references/audit-ux.md": 6050, "skills/checklist/SKILL.md": 9250, "skills/distribute/SKILL.md": 4600,
@@ -79,7 +82,7 @@ BUDGETS = {
 # The auditor reads one lens a spawn: qa (its reference + automation.md) is the costliest.
 SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"],
                "audit": ["references/audit-qa.md", "references/automation.md"]}
-PER_SPAWN_LIMIT = {"sa": 29600, "dev": 40150, "audit": 35450}
+PER_SPAWN_LIMIT = {"sa": 30000, "dev": 40550, "audit": 35500}  # 3.15 group order: +0.2k protocol, +0.25k sa/dev
 DESCRIPTION_LIMIT = 700
 
 
@@ -481,7 +484,7 @@ class StateMachine(unittest.TestCase):
         ("references/clarify.md", r"\"Dừng ở đây\" ⇒ giữ \(thiếu thì gắn\) `needs_info`", "dừng ở cổng xác nhận thì /run không tự cho DEV làm"),
         ("references/dispatch.md", r"ask mà `plan` thiếu/`options` \| SA `MODE=design`", "ask: ticket đã thiết kế bằng auto vẫn qua cổng xác nhận"),
         ("references/dispatch.md", r"`plan: confirm`.*SYS \*confirmed\* → DEV `MODE=new`", "ask: DEV chỉ bắt đầu sau xác nhận"),
-        ("skills/do/SKILL.md", r"trừ cổng ask ở điểm 8", "/do được hỏi ở cổng ask"),
+        ("skills/do/SKILL.md", r"trừ cổng ask ở điểm 9", "/do được hỏi ở cổng ask"),
         # 3.8: a ticket's work starts from origin/<base>; the main checkout is the person's and changes branch at any time
         ("references/protocol.md", r"\*\*Không dùng checkout chính\*\*.*Không tạo/đổi nhánh local", "agent không đọc code/luật ở nhánh người đang mở"),
         ("references/protocol.md", r"`git -C <wt> push origin HEAD:refs/heads/<branch>`", "worktree detached push bằng refspec đầy đủ"),
@@ -546,6 +549,14 @@ class StateMachine(unittest.TestCase):
         ("agents/sa.md", r"DoR, Size xét từng sub", "nhóm lớn vẫn qua DoR theo từng sub"),
         ("skills/task/SKILL.md", r"chỉ Ready khi PO chọn làm chung một PR", "cha chỉ vào pipeline khi PO chốt làm chung"),
         ("skills/do/SKILL.md", r"`in_group` ⇒ dừng", "/do không làm riêng sub của nhóm"),
+        ("skills/do/SKILL.md", r"group <owner/repo> --issue <n> --subs", "/do biết sub nào còn gộp được"),
+        ("skills/do/SKILL.md", r"\*\*\"Chung một PR \(Recommended\)\"\*\*", "/do #cha đề xuất chung một PR, đứng đầu"),
+        ("skills/do/SKILL.md", r"Chọn chung = PO xác nhận cổng Ready của cha ⇒ SYS \*grouped\*", "gộp chỉ khi người chọn"),
+        ("references/dispatch.md", r"\*grouped\*.*`group: <free>`.*Status → `ready`; rồi `group-sync`", "sub theo cha ngay khi gộp"),
+        ("references/dispatch.md", r"mỗi SYS transition \(cả \*grouped\*, \*done\*\) ⇒ `agentflow-board group-sync", "sub theo Status cha mọi transition"),
+        ("references/protocol.md", r"DEV code hết các sub, rồi \*\*một\*\* lượt automation", "nhóm: code hết rồi mới gom automation"),
+        ("agents/sa.md", r"`Lượt 1\.\.k-1` chỉ code, theo sub.*`Lượt k: Automation`", "SA chia lượt nhóm: code theo sub, automation cuối"),
+        ("agents/dev.md", r"lượt code chỉ code \+ gắn id.*lượt `Automation` viết flow mọi TC của cả nhóm", "DEV không viết flow ở lượt code của nhóm"),
         # 3.13 (người dùng chọn 2026-11-26/27): SA review code trước staging, cổng chất lượng, DEV chia lượt, orchestrator chờ pipeline
         ("agents/dev.md", r"§1–§6 rồi §8 giao review code, \*\*không\*\* deploy", "review code trước staging: ❌ không tốn deploy + verify"),
         ("agents/dev.md", r"\*\*Giao review code\*\*.*`step: code`", "DEV giao SA review code"),

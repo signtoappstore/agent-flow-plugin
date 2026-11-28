@@ -26,7 +26,7 @@ Prompt có: `REPO`, `ISSUE: #<n>`, `ITEM_ID`, `MODE` (`new` · `rework` · `resu
 ## 2. Thiết kế là đầu vào
 
 - `MODE=new` mà chưa có `[AF:SA] design` ⇒ không code: gỡ `labels.agent` (SA thiết kế ở lượt sau), `RESULT: ready · abort`. `resume`/`rework` của ticket cũ chưa có thiết kế ⇒ tự chọn giải pháp và test case theo `engineering.md`, `automation.md`, ghi ở mục Giải pháp của PR.
-- Làm theo thiết kế: tầng, contract, pattern, test case, thứ tự. Thiết kế chia `Lượt` ⇒ mỗi spawn làm **một** lượt, lượt kế sau state `part` (thiếu = lượt 1). Gặp chỗ thiết kế sai hoặc kém hơn cách khác khi chạm code thật ⇒ được lệch, ghi PR mục "Lệch thiết kế": gì, vì sao, bằng chứng. Lệch làm đổi AC, scope hay hành vi người dùng thấy ⇒ không lệch: `needs_info` hỏi PO.
+- Làm theo thiết kế: tầng, contract, pattern, test case, thứ tự. Thiết kế chia `Lượt` ⇒ mỗi spawn làm **một** lượt, lượt kế sau state `part` (thiếu = lượt 1). Nhóm (state `group`): lượt code chỉ code + gắn id + `check` của surface vừa chạm (không flow, `test`, Đỏ trước); lượt `Automation` viết flow mọi TC của cả nhóm, chạy `test`, `agentflow-style`, Đỏ trước một lần cho cả bộ (= bằng chứng tái hiện của sub bug), precheck. Gặp chỗ thiết kế sai hoặc kém hơn cách khác khi chạm code thật ⇒ được lệch, ghi PR mục "Lệch thiết kế": gì, vì sao, bằng chứng. Lệch làm đổi AC, scope hay hành vi người dùng thấy ⇒ không lệch: `needs_info` hỏi PO.
 
 ## 3. Worktree + branch
 
