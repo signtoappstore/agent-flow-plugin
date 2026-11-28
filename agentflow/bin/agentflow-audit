@@ -12,9 +12,22 @@ rank and file as tickets.
         e2e inventory + robustness lint: Maestro flows (tags, ids, asserts, optional/retry/point/text selectors,
         clearState, literal credentials, AI asserts, ids no client code defines any more) and specs of Playwright,
         Cypress, Detox, Flutter integration_test (hard waits, only/skip, xpath/nth, no expect)
+  map [--max-areas N] [PATH ...]
+        inventory of the whole product: screens/routes (Next, Expo, SvelteKit, Nuxt, React Router, Vue/Angular router,
+        React Navigation, GoRouter/AutoRoute, Compose), API endpoints (Express-like, Nest, FastAPI/Flask, Django, Go,
+        Spring, Next/SvelteKit route files, Supabase functions) with an auth hint, roles the code names (enums, union
+        types, SQL enums, role checks, isAdmin-like flags), the test accounts of each role in the secret folder
+        `staging.notes` (key names only, never a value) and the areas (screen or API group) the coverage map tracks
+  plan --map FILE [--prev FILE] [--closed N,N] [--focus TEXT] [--max N]
+        areas to test this run, from the last checklist's coverage map: a bug whose ticket is closed (verify the fix),
+        code changed since the area was last tested, never tested, then the oldest
+  ledger --map FILE --sha SHA [--run FILE] [--prev FILE] [--index FILE] [--tickets ID=#N,...] [--date YYYY-MM-DD]
+        markdown for the checklist issue: `## Sức khoẻ` (one row a run, trend) + `## Bản đồ phủ` (area × role, merged
+        with the last run)
   findings FILE ... [--body ID]
         check + merge the auditors' findings files into one ranked index (one JSON line; exit 1 with errors to fix);
-        --body ID prints that finding's ticket body
+        a finding with `- extends: <lens>:F<k>` adds an expert's view to that finding (panel); --body ID prints that
+        finding's ticket body
 
 Run it inside the audit worktree (`agentflow-base audit`): git there sees origin/<base>, not the person's checkout.
 Numbers say where to look, not what is wrong: the auditor reads the code before it writes a finding.
@@ -22,6 +35,7 @@ Numbers say where to look, not what is wrong: the auditor reads the code before 
 
 import argparse
 import collections
+import datetime
 import json
 import os
 import re
@@ -701,17 +715,630 @@ def cmd_flows(a):
           "note": None if report or specs else "không thấy thư mục e2e — khai surfaces.<key>.e2e_dir hoặc chưa có automation"})
 
 
+# ── map ─────────────────────────────────────────────────────────────────────
+
+ROUTE_SEG_SKIP = re.compile(r"^(\(.*\)|@.*)$")  # route groups (auth), parallel slots @modal: not part of the URL
+FILE_ROUTES = [  # kind, pattern on the path inside the surface, group = folder of the route
+    ("next", re.compile(r"(?:^|/)app/((?:.*/)?)page\.(?:tsx|jsx|ts|js|mdx)$")),
+    ("svelte", re.compile(r"(?:^|/)src/routes/((?:.*/)?)\+page\.svelte$")),
+    ("pages", re.compile(r"(?:^|/)pages/(.+)\.(?:tsx|jsx|vue)$")),
+]
+API_FILES = [
+    ("next", re.compile(r"(?:^|/)app/((?:.*/)?)route\.(?:ts|js)$")),
+    ("svelte", re.compile(r"(?:^|/)src/routes/((?:.*/)?)\+server\.(?:ts|js)$")),
+    ("pages", re.compile(r"(?:^|/)pages/api/(.+)\.(?:ts|js)$")),
+    ("supabase", re.compile(r"(?:^|/)supabase/functions/([\w-]+)/index\.(?:ts|js)$")),
+]
+ROUTER_FILE = re.compile(r"createBrowserRouter|createHashRouter|<Routes\b|<Route\b|RouterModule|createRouter\(|new VueRouter|"
+                         r"\broutes\s*[:=]\s*\[|useRoutes\(")
+SCREEN_PATTERNS = {  # language → [(kind, pattern)]: group 1 = route or screen name
+    "js": [("route", re.compile(r"<Route\b[^>]*?\bpath=\{?[\"'`]([^\"'`]*)[\"'`]")),
+           ("route", re.compile(r"\bpath:\s*[\"'`]([^\"'`]*)[\"'`]")),
+           ("screen", re.compile(r"<\w+\.Screen\b[^>]*?\bname=\{?[\"'`]([\w .-]+)[\"'`]"))],
+    "dart": [("route", re.compile(r"\b(?:GoRoute|AutoRoute|CustomRoute|GoRouteData)\((?:[^()]|\([^()]*\)){0,300}?\bpath:\s*[\"']([^\"']+)[\"']")),
+             ("route", re.compile(r"[{,]\s*[\"'](/[\w/:-]*)[\"']\s*:\s*\(\w*\)\s*=>"))],
+    "kotlin": [("route", re.compile(r"\bcomposable\(\s*(?:route\s*=\s*)?\"([^\"]+)\""))],
+}
+METHODS = "get|post|put|patch|delete"
+API_PATTERNS = [  # languages, pattern: group(method), group(path)
+    (JS_LIKE + ("dart",), re.compile(r"\b(?:app|router|route|routes|api|server|r|fastify)\.(%s)\(\s*[\"'`](/[^\"'`]*)[\"'`]" % METHODS)),
+    (("py",), re.compile(r"@\w+\.(%s|route|api_route)\(\s*[\"'](/[^\"']*)[\"']" % METHODS)),
+    (("go",), re.compile(r"\.(GET|POST|PUT|PATCH|DELETE|Get|Post|Put|Patch|Delete|HandleFunc|Handle)\(\s*\"(/[^\"]*)\"")),
+]
+DART_ROUTE_IDENT = re.compile(r"\b(?:GoRoute|AutoRoute|CustomRoute)\((?:[^()]|\([^()]*\)){0,300}?\bpath:\s*(?:[A-Z]\w*\.)?([a-z_]\w*)(\.substring\(1\))?")
+DART_CONST = re.compile(r"\b(?:static\s+)?const\s+(?:String\s+)?([a-zA-Z_]\w*)\s*=\s*[\"']([^\"']*)[\"']")
+NEST_CTRL = re.compile(r"@Controller\(\s*(?:[\"'`]([^\"'`]*)[\"'`])?")
+NEST_ROUTE = re.compile(r"@(Get|Post|Put|Patch|Delete)\(\s*(?:[\"'`]([^\"'`]*)[\"'`])?\s*\)")
+SPRING_CLASS = re.compile(r"@RequestMapping\(\s*(?:value\s*=\s*|path\s*=\s*)?\{?\s*\"([^\"]*)\"[^)]*\)\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:public\s+|open\s+|internal\s+)?(?:abstract\s+)?class\b")
+SPRING_ROUTE = re.compile(r"@(Get|Post|Put|Patch|Delete|Request)Mapping\(\s*(?:value\s*=\s*|path\s*=\s*)?\{?\s*\"([^\"]*)\"")
+DJANGO = re.compile(r"\b(?:re_)?path\(\s*r?[\"']([^\"']*)[\"']")
+NEXT_METHOD = re.compile(r"export\s+(?:async\s+)?(?:function|const)\s+(GET|POST|PUT|PATCH|DELETE)\b")
+AUTH_HINT = re.compile(r"auth|guard|role|permission|protect|require_?user|login_required|authorize|isAuthenticated|jwt|session|"
+                       r"policy|acl|admin", re.I)
+# Who a user is, not what a thing is: `SlotRole`, `ExerciseRole`, `PushPermission` name no actor.
+ROLE_WORD = (r"(?:User|App|Member|Account|Staff|Team|Org|Organization|Gym|Brand|Shop|Store|Auth|Access|Platform|System|"
+             r"Workspace|Project|Group|Tenant|Customer|Partner|Admin)?Roles?|(?:User|Account|Member|Actor)(?:Type|Kind)")
+ROLE_ENUM = re.compile(r"\benum\s+(?:class\s+)?(?:%s)\s*(?::\s*\w+\s*)?\{([^}]{0,800})\}" % ROLE_WORD)
+ROLE_TYPE = re.compile(r"\btype\s+(?:%s)\s*=\s*([^;\n]{0,300})" % ROLE_WORD)
+ROLE_SQL = re.compile(r"create\s+type\s+[\w.\"]*(?:role|user_type|account_type)[\w\"]*\s+as\s+enum\s*\(([^)]{0,500})\)", re.I)
+ROLE_RLS = re.compile(r"\bto\s+(anon|authenticated|service_role)\b", re.I)
+ROLE_CMP = re.compile(r"\brole\w*\s*(?:===?|!==?)\s*[\"']([A-Za-z][\w-]{1,30})[\"']|[\"']([A-Za-z][\w-]{1,30})[\"']\s*(?:===?|!==?)\s*[\w.?]*role\b",
+                      re.I)
+ROLE_CALL = re.compile(r"\b(?:hasRole|hasAnyRole|requireRoles?|checkRole|isRole|role_required|roles_required|has_role|Roles|RolesAllowed)"
+                       r"\(\s*\[?\s*[\"']([\w-]{2,30})[\"']")
+ROLE_FLAG = re.compile(r"\bis(Admin|SuperAdmin|Owner|Staff|Manager|Moderator|Editor|Viewer|Coach|Trainer|Teacher|Student|Seller|Buyer|"
+                       r"Merchant|Vendor|Driver|Customer|Member|Guest|Partner|Operator|Support)\b")
+NOT_ROLE = {"string", "number", "null", "undefined", "none", "true", "false", "int", "unknown", "any", "object", "boolean"}
+AUTH_SCREEN = re.compile(r"log-?in|sign-?in|sign-?up|register|auth|onboard|đăng", re.I)
+ACCOUNT_KEY = re.compile(r"^(?:E2E|TEST|QA|STAGING)_(?:(\w+?)_)?(EMAIL|USER|USERNAME|LOGIN|PHONE|PASSWORD|PASS|OTP|PIN|TOKEN)$")
+ACCOUNT_REF = re.compile(r"\b((?:E2E|TEST|QA|STAGING)_(?:\w+?_)?(?:EMAIL|USER|USERNAME|LOGIN|PHONE|PASSWORD|PASS|OTP|PIN|TOKEN))\b")
+PATH_TOKEN = re.compile(r"[\w.-]+(?:/[\w.-]+)*/?")
+GENERIC_FILE = {"index", "main", "app", "server", "mod", "init", "__init__", "+server", "route", "page", "routes", "router", "urls",
+                "views", "api", "handler", "handlers", "controller", "controllers"}
+GENERIC_DIR = {"src", "routes", "router", "routers", "controllers", "controller", "api", "handlers", "http", "web", "app", "internal",
+               "cmd", "server", "lib", "v1", "v2", "rest", "endpoints", "presentation", "interfaces", "adapters", "modules"}
+PARAM = re.compile(r"^(?::\w+|\[\[?\.{0,3}[\w-]+\]?\]|\{[\w-]+\}|<[\w:-]+>|\*+)$")
+
+
+def route_of(folder):
+    """URL of a file route: `(group)` and `@slot` dropped, `[id]` → `:id`, `[...all]` → `*`, `index` dropped."""
+    parts = []
+    for seg in folder.strip("/").split("/"):
+        if not seg or ROUTE_SEG_SKIP.match(seg) or seg in ("index", "_layout"):
+            continue
+        if seg.startswith("[...") or seg.startswith("[[..."):
+            seg = "*"
+        elif seg.startswith("[") and seg.endswith("]"):
+            seg = ":" + seg.strip("[]")
+        parts.append(seg)
+    return "/" + "/".join(parts)
+
+
+def norm_path(path):
+    """`/orders/{id}`, `/orders/<int:id>`, `/orders/[id]` → `/orders/:id`; no trailing slash; Django `orders/` → `/orders`."""
+    path = "/" + path.strip().strip("^$").strip("/")
+    segs = [(":p" if PARAM.match(s) else s) for s in path.split("/")[1:]]
+    return "/" + "/".join(s for s in segs if s)
+
+
+def api_area(path, depth=2):
+    """API group of an endpoint: its first segments up to the first parameter, at most `depth` (a version segment
+    and `api` do not count)."""
+    keep = []
+    for seg in path.strip("/").split("/"):
+        if not seg or seg.startswith(":"):
+            break
+        keep.append(seg)
+        if len([s for s in keep if s not in ("api", "functions") and not re.match(r"^v\d+$", s)]) >= depth:
+            break
+    return "API /" + "/".join(k for k in keep if k not in ("api", "functions") and not re.match(r"^v\d+$", k))
+
+
+def role_values(body):
+    """Members of an enum body or the literals of a union type: `Admin = 'admin'` → admin, `case owner` → owner."""
+    out = []
+    literals = re.findall(r"[\"']([A-Za-z][\w-]{1,30})[\"']", body)
+    if literals:
+        return [v.lower() for v in literals]
+    for piece in re.split(r"[,;\n]", body):
+        piece = re.sub(r"^\s*case\s+", "", piece).strip()
+        m = re.match(r"([A-Za-z][\w-]{1,30})", piece)
+        if m:
+            out.append(m.group(1).lower())
+    return out
+
+
+def surface_of(rel, surface_list):
+    """(key, path) of the surface holding `rel`: the longest path that contains it."""
+    best, size = ("", "."), -1
+    for key, path, _ in surface_list:
+        inside = path == "." or rel.startswith(path + "/")
+        length = 0 if path == "." else len(path)
+        if inside and length > size:
+            best, size = (key, path), length
+    return best
+
+
+def frameworks(root, surface_list):
+    """surface path → the file-routing frameworks its package.json (or the root one) names."""
+    root_pkg = read_text(root, "package.json") or ""
+    out = {}
+    for _, spath, _ in surface_list:
+        pkg = read_text(root, os.path.join(spath, "package.json")) if spath != "." else ""
+        text = (pkg or "") + root_pkg
+        found = set()
+        for name, word in (("next", '"next"'), ("nuxt", '"nuxt"'), ("expo", '"expo-router"'), ("svelte", '"@sveltejs/kit"')):
+            if word in text:
+                found.add(name)
+        out[spath] = found
+    return out
+
+
+def file_screen(inner, found):
+    """Route of a file-routed screen (Next app/pages, Nuxt pages, Expo app, SvelteKit) or None."""
+    if "expo" in found:
+        m = re.match(r"^(?:src/)?app/(.+)\.(?:tsx|jsx|ts|js)$", inner)
+        skip = m and re.search(r"(^|/)(_layout|\+html|\+native-intent)$|\+api$|(^|/)api/", m.group(1))
+        if m and not skip:
+            return route_of(m.group(1))
+        return None
+    for kind, rx in FILE_ROUTES:
+        m = rx.search(inner)
+        if not m:
+            continue
+        allowed = {"next": "next" in found, "svelte": "svelte" in found, "pages": bool(found & {"next", "nuxt"})}[kind]
+        special = kind == "pages" and re.search(r"(^|/)(_app|_document|_error|api/)", m.group(1) + "/")
+        if allowed and not special:
+            return route_of(m.group(1))
+    return None
+
+
+def account_role(name):
+    m = ACCOUNT_KEY.match(name)
+    return (m.group(1) or "default").lower().replace("_", "-") if m else None
+
+
+def accounts_of(cfg, root, flow_texts):
+    """Role → key names of its test account: KEY= lines of the secret folder `staging.notes` names (a path, or a path
+    inside its prose), key names the notes mention, `${E2E_…}` the flows use. Values are never read past the `=`: the
+    agent passes the files with --env-file. → (accounts, env files, note)"""
+    notes = str(((cfg.get("staging") or {}).get("notes")) or "").strip()
+    main = afconfig.main_root(root) or root
+    roles = collections.defaultdict(list)
+
+    def add(name):
+        role = account_role(name)
+        if role and name not in roles[role]:
+            roles[role].append(name)
+
+    for text in [notes] + flow_texts:
+        for name in ACCOUNT_REF.findall(text):
+            add(name)
+    candidates = [notes] if notes and "\n" not in notes and " " not in notes else PATH_TOKEN.findall(notes)
+    files = []
+    for token in candidates:
+        path = token if os.path.isabs(token) else os.path.join(main, token)
+        if os.path.isdir(path):
+            for dirpath, dirs, names in os.walk(path):
+                deep = dirpath[len(path):].count(os.sep) >= 2
+                dirs[:] = [] if deep else [d for d in dirs if not d.startswith(".")]
+                files += [os.path.join(dirpath, n) for n in sorted(names)]
+        elif os.path.isfile(path) and "/" in token:
+            files.append(path)
+    used = []
+    for fpath in dict.fromkeys(files):
+        try:
+            if os.path.getsize(fpath) > 200_000:
+                continue
+            with open(fpath, encoding="utf-8", errors="replace") as fh:
+                lines = [ln.strip() for ln in fh]
+        except OSError:
+            continue
+        names = []
+        for line in lines:
+            if line.startswith("export "):
+                line = line[7:]
+            if "=" in line and not line.startswith("#"):
+                names.append(line.split("=", 1)[0].strip())
+        hits = [n for n in names if account_role(n)]
+        for name in hits:
+            add(name)
+        if hits:
+            used.append(fpath)  # absolute: the auditor runs from the worktree, the secret folder is in the main checkout
+    note = None
+    if not notes:
+        note = "staging.notes trống — không biết tài khoản test của từng role"
+    elif not roles:
+        note = "không thấy tên key tài khoản test (E2E_<ROLE>_EMAIL…) trong staging.notes, secret folder hay flow"
+    return dict(roles), used, note
+
+
+def screens_and_endpoints(root, cfg, paths):
+    surface_list = surfaces(cfg) or [("", ".", "")]
+    files = tracked(root, paths, cfg)
+    routed = frameworks(root, surface_list)
+    screens, endpoints, roles = [], [], collections.defaultdict(lambda: {"hits": 0, "at": []})
+    flow_texts = []
+
+    def add_role(name, at):
+        name = name.lower().replace("_", "-")
+        if name in NOT_ROLE or len(name) < 3:
+            return
+        roles[name]["hits"] += 1
+        if len(roles[name]["at"]) < 3 and at not in roles[name]["at"]:
+            roles[name]["at"].append(at)
+
+    for rel in files:
+        key, spath = surface_of(rel, surface_list)
+        inner = rel if spath == "." else rel[len(spath) + 1:]
+        if TESTS.search(rel):
+            if rel.endswith((".yaml", ".yml", ".ts", ".js", ".sh", ".env.example")) and len(flow_texts) < 2000:
+                flow_texts.append(read_text(root, rel) or "")
+            continue
+        if rel.endswith(".sql"):
+            text = read_text(root, rel) or ""
+            for m in ROLE_SQL.finditer(text):
+                for v in role_values(m.group(1)):
+                    add_role(v, "%s:%d" % (rel, line_of(text, m.start())))
+            for m in ROLE_RLS.finditer(text):
+                add_role(m.group(1), "%s:%d" % (rel, line_of(text, m.start())))
+            continue
+        lang = LANGS.get(os.path.splitext(rel)[1].lower())
+        if not lang:
+            continue
+        route = file_screen(inner, routed.get(spath, set()))
+        if route:
+            screens.append({"area": route, "surface": key, "at": rel + ":1"})
+        for kind, rx in API_FILES:
+            m = rx.search(inner)
+            needs = {"next": "next", "pages": "next", "svelte": "svelte"}.get(kind)
+            if m and (needs is None or needs in routed.get(spath, set())):
+                text = read_text(root, rel) or ""
+                if kind == "supabase":
+                    route = "/functions/v1/" + m.group(1)
+                elif kind == "pages":
+                    route = "/api" + route_of(m.group(1))
+                else:
+                    route = route_of(m.group(1))
+                methods = NEXT_METHOD.findall(text) or ["ANY"]
+                for method in methods:
+                    endpoints.append({"method": method.upper(), "path": norm_path(route), "surface": key, "at": rel + ":1",
+                                      "auth_hint": bool(AUTH_HINT.search(text)), "file_route": True})
+                break
+        text = read_text(root, rel)
+        if text is None:
+            continue
+        lines = text.splitlines()
+
+        def near(pos, around=0):
+            """Line of `pos` + whether an auth word sits on it (middleware) or `around` lines about it (decorators)."""
+            n = line_of(text, pos)
+            return n, bool(AUTH_HINT.search("\n".join(lines[max(0, n - 1 - around):n + around])))
+
+        family = "js" if lang in JS_LIKE else lang
+        router_file = family != "js" or bool(ROUTER_FILE.search(text))
+        for kind, rx in SCREEN_PATTERNS.get(family, []):
+            if kind == "route" and family == "js" and not router_file:
+                continue
+            for m in rx.finditer(text):
+                value = m.group(1).strip()
+                is_file = kind == "route" and "." in value.split("/")[-1]
+                if not value or value in ("*", "**") or value.startswith(("http", "./", "../")) or is_file:
+                    continue
+                area = norm_path(value) if kind == "route" else value
+                screens.append({"area": area, "surface": key, "at": "%s:%d" % (rel, line_of(text, m.start()))})
+        if lang == "dart" and "path:" in text:
+            consts = dict(DART_CONST.findall(text))
+            for m in DART_ROUTE_IDENT.finditer(text):
+                value = consts.get(m.group(1))
+                if value is not None:
+                    screens.append({"area": norm_path(value), "surface": key, "at": "%s:%d" % (rel, line_of(text, m.start()))})
+        for langs, rx in API_PATTERNS:
+            if lang in langs:
+                for m in rx.finditer(text):
+                    n, auth = near(m.start(), 3 if lang == "py" else 0)
+                    method = m.group(1).upper()
+                    method = "ANY" if method in ("ROUTE", "API_ROUTE", "HANDLEFUNC", "HANDLE") else method
+                    endpoints.append({"method": method, "path": norm_path(m.group(2)), "surface": key, "at": "%s:%d" % (rel, n), "auth_hint": auth})
+        if lang in JS_LIKE and "@Controller" in text:
+            ctrl = NEST_CTRL.search(text)
+            prefix = (ctrl.group(1) or "") if ctrl else ""
+            guarded = bool(ctrl and re.search(r"@UseGuards|@Roles", text[:ctrl.start()]))  # a guard on the whole controller
+            for m in NEST_ROUTE.finditer(text):
+                n, auth = near(m.start(), 3)
+                endpoints.append({"method": m.group(1).upper(), "path": norm_path(prefix + "/" + (m.group(2) or "")), "surface": key,
+                                  "at": "%s:%d" % (rel, n), "auth_hint": auth or guarded})
+        if lang in ("java", "kotlin"):
+            cls = SPRING_CLASS.search(text)
+            prefix = cls.group(1) if cls else ""
+            for m in SPRING_ROUTE.finditer(text):
+                if cls and m.start() == text.find("@RequestMapping", cls.start()):
+                    continue
+                n, auth = near(m.start(), 3)
+                method = "ANY" if m.group(1) == "Request" else m.group(1).upper()
+                endpoints.append({"method": method, "path": norm_path(prefix + "/" + m.group(2)), "surface": key, "at": "%s:%d" % (rel, n),
+                                  "auth_hint": auth})
+        if lang == "py" and os.path.basename(rel) == "urls.py":
+            for m in DJANGO.finditer(text):
+                n, auth = near(m.start())
+                if m.group(1):
+                    endpoints.append({"method": "ANY", "path": norm_path(m.group(1)), "surface": key, "at": "%s:%d" % (rel, n), "auth_hint": auth})
+        for rx in (ROLE_ENUM, ROLE_TYPE):
+            for m in rx.finditer(text):
+                for v in role_values(m.group(1)):
+                    add_role(v, "%s:%d" % (rel, line_of(text, m.start())))
+        for rx in (ROLE_CMP, ROLE_CALL):
+            for m in rx.finditer(text):
+                add_role(next(g for g in m.groups() if g), "%s:%d" % (rel, line_of(text, m.start())))
+        for m in ROLE_FLAG.finditer(text):
+            add_role(re.sub(r"(?<!^)([A-Z])", r"-\1", m.group(1)), "%s:%d" % (rel, line_of(text, m.start())))
+    return screens, endpoints, roles, flow_texts
+
+
+def service_of(at):
+    """Name of the API module an endpoint is defined in: `admin.router.ts` → admin, `orders/views.py` → orders."""
+    rel = at.rsplit(":", 1)[0]
+    stem = os.path.splitext(os.path.basename(rel))[0]
+    stem = re.sub(r"[._-]?(router|routes|route|controller|controllers|handler|handlers|api|views|urls|endpoints?|resource)$", "",
+                  stem, flags=re.I)
+    if stem and stem.lower() not in GENERIC_FILE:
+        return stem
+    for part in reversed(os.path.dirname(rel).split("/")):
+        if part and part.lower() not in GENERIC_DIR:
+            return part
+    return ""
+
+
+def ui_group(area, depth):
+    """A screen route cut to its first `depth` static segments (None = whole route); a screen name stays."""
+    if depth is None or not area.startswith("/"):
+        return area
+    keep = []
+    for seg in area.strip("/").split("/"):
+        if not seg or seg.startswith(":") or seg == "*":
+            break
+        keep.append(seg)
+        if len(keep) >= depth:
+            break
+    return "/" + "/".join(keep)
+
+
+def api_group(e, level):
+    """level 1: module + first static segment (`API admin /campaigns`); level 2: module only (`API admin`). A file route
+    (Next, SvelteKit, Supabase) has its module in the path."""
+    seg = api_area(e["path"], 1)[4:].strip("/")
+    service = "" if e.get("file_route") else service_of(e["at"])
+    if not service:
+        return "API /" + seg if seg else "API /"
+    if level == 2 or not seg or seg == service:
+        return "API " + service
+    return "API %s /%s" % (service, seg)
+
+
+def build_map(root, cfg, paths, max_areas):
+    screens, endpoints, roles, flow_texts = screens_and_endpoints(root, cfg, paths)
+    uniq = {}
+    for s in screens:
+        uniq.setdefault((s["surface"], s["area"]), s)
+    screens = sorted(uniq.values(), key=lambda s: (s["surface"], s["area"]))
+    uniq = {}
+    for e in endpoints:
+        uniq.setdefault((e["method"], e["path"]), e)
+    endpoints = sorted(uniq.values(), key=lambda e: (e["path"], e["method"]))
+    areas = collections.OrderedDict()
+
+    def area(name, kind, surface, at):
+        a = areas.setdefault(name, {"area": name, "kind": kind, "surface": surface, "files": [], "count": 0})
+        a["count"] += 1
+        f = at.rsplit(":", 1)[0]
+        if f not in a["files"]:
+            a["files"].append(f)
+
+    multi = len({s["surface"] for s in screens}) > 1
+    ui_budget = max(1, max_areas * 3 // 5)
+    for depth in (None, 2, 1):  # whole routes when they fit, else grouped by their first segments
+        if len({(s["surface"], ui_group(s["area"], depth)) for s in screens}) <= ui_budget:
+            break
+    for s in screens:
+        name = ui_group(s["area"], depth)
+        area(("%s %s" % (s["surface"], name)) if multi and s["surface"] else name, "ui", s["surface"], s["at"])
+    calls = [e for e in endpoints if not e["path"].startswith("/.well-known")]
+    api_budget = max(1, max_areas - len(areas))
+    level = 1 if len({api_group(e, 1) for e in calls}) <= api_budget else 2
+    for e in calls:
+        area(api_group(e, level), "api", e["surface"], e["at"])
+    listed = list(areas.values())[:max_areas]
+    for a in listed:
+        a["files"] = a["files"][:20]
+    if any(AUTH_SCREEN.search(s["area"]) for s in screens) and "guest" not in roles:
+        roles["guest"] = {"hits": 0, "at": ["màn đăng nhập/đăng ký: người chưa đăng nhập"]}
+    accounts, env_files, note = accounts_of(cfg, root, flow_texts)
+    role_list = [{"role": r, "hits": v["hits"], "at": v["at"]} for r, v in sorted(roles.items(), key=lambda kv: (-kv[1]["hits"], kv[0]))]
+    names = [r["role"] for r in role_list]
+    missing = [r for r in names[:8] if r not in accounts and r != "guest"]
+    return {"screens": screens[:300], "endpoints": endpoints[:300], "areas": listed, "dropped_areas": max(0, len(areas) - max_areas),
+            "roles": role_list[:20], "accounts": accounts, "env_files": env_files, "missing_accounts": missing,
+            "unguarded": [{"method": e["method"], "path": e["path"], "at": e["at"]} for e in endpoints if not e["auth_hint"]][:30],
+            "note": note if note else (None if screens or endpoints else "không thấy route/màn/endpoint — dò router bằng tay")}
+
+
+def cmd_map(a):
+    root, cfg = context()
+    emit(build_map(root, cfg, scope(cfg, a.paths), a.max_areas))
+
+
+# ── coverage: plan + ledger ─────────────────────────────────────────────────
+
+COVER_HEAD = "Bản đồ phủ"
+HEALTH_HEAD = "Sức khoẻ"
+VERIFY_HEAD = "Xác minh sửa"
+LAST = "Lần cuối"
+TESTED = ("✓", "✗", "⛔")  # pass · bug · denied as it must be; `·` not yet, `—` not for this role
+LAST_RX = re.compile(r"@([0-9a-f]{7,40})\s+(\d{4}-\d{2}-\d{2})")
+TICKET = re.compile(r"#(\d+)")
+
+
+def section(text, head):
+    m = re.search(r"^##\s+%s\b.*$" % re.escape(head), text or "", re.M)
+    if not m:
+        return ""
+    rest = text[m.end():]
+    nxt = re.search(r"^##\s", rest, re.M)
+    return rest[:nxt.start()] if nxt else rest
+
+
+def parse_table(block):
+    """(header, rows) of the first markdown table in `block`."""
+    rows = []
+    for line in block.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            if rows:
+                break
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if all(re.match(r"^:?-{2,}:?$", c) for c in cells if c):
+            continue
+        rows.append(cells)
+    return (rows[0], rows[1:]) if rows else ([], [])
+
+
+def coverage_of(text):
+    """{area: {"cells": {role: cell}, "sha": .., "date": ..}}, roles in table order."""
+    header, rows = parse_table(section(text, COVER_HEAD))
+    if not header:
+        return {}, []
+    roles = [h for h in header[1:] if h != LAST]
+    out = {}
+    for row in rows:
+        row = row + [""] * (len(header) - len(row))
+        cells = {r: (row[i + 1] or "·") for i, r in enumerate(header[1:]) if r != LAST}
+        last = LAST_RX.search(row[header.index(LAST)]) if LAST in header else None
+        out[row[0]] = {"cells": cells, "sha": last.group(1) if last else None, "date": last.group(2) if last else None}
+    return out, roles
+
+
+def read_file(path):
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as err:
+        emit({"error": "không đọc được %s: %s" % (path, err)}, 3)
+
+
+def load_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as err:
+        emit({"error": "không đọc được %s: %s" % (path, err)}, 3)
+
+
+def cmd_plan(a):
+    root, _ = context()
+    amap = load_json(a.map)
+    prev, roles = coverage_of(read_file(a.prev))
+    roles = roles or [r["role"] for r in amap.get("roles", [])][:8]
+    closed = {int(n) for n in re.findall(r"\d+", a.closed or "")}
+    changed_since = {}
+    head = git(root, "rev-parse", "HEAD").strip()
+    focus = (a.focus or "").strip().lower()
+    rows = []
+    for order, item in enumerate(amap.get("areas", [])):
+        name, row = item["area"], prev.get(item["area"])
+        if focus and focus not in name.lower() and not any(focus.strip("/") in f.lower() for f in item.get("files", [])):
+            continue
+        cells = row["cells"] if row else {}
+        tested = any(c.startswith(TESTED) for c in cells.values())
+        tickets = {int(n) for c in cells.values() if c.startswith("✗") for n in TICKET.findall(c)}
+        why = None
+        if tickets & closed:
+            why, rank = "verify %s" % " ".join("#%d" % n for n in sorted(tickets & closed)), 0
+        elif row and row["sha"]:
+            sha = row["sha"]
+            if sha not in changed_since:
+                known = git(root, "cat-file", "-t", sha).strip() == "commit"
+                changed_since[sha] = set(git(root, "diff", "--name-only", sha, head).splitlines()) if known and head else None
+            diff = changed_since[sha]
+            if diff and set(item.get("files", [])) & diff:
+                why, rank = "changed since @%s" % sha[:7], 1
+        if why is None and not tested:
+            why, rank = "new", 2
+        if why is None:
+            why, rank = ("open bug" if tickets else "stale %s" % (row["date"] or "?")), 4 if tickets else 3
+        rows.append((rank, (row or {}).get("date") or "", order, name, why, item, cells))
+    rows.sort(key=lambda r: r[:3])  # reason, then the oldest test, then the map's order (screens before API)
+    pick = rows if a.max <= 0 else rows[:a.max]
+    ever = sum(1 for item in amap.get("areas", []) if any(c.startswith(TESTED) for c in (prev.get(item["area"]) or {}).get("cells", {}).values()))
+    emit({"total": len(amap.get("areas", [])), "matched": len(rows), "covered_before": ever, "roles": roles,
+          "missing_accounts": amap.get("missing_accounts", []), "env_files": amap.get("env_files", []),
+          "selected": [{"area": name, "kind": item["kind"], "surface": item.get("surface"), "why": why, "files": item.get("files", [])[:3],
+                        "cells": {r: cells.get(r, "·") for r in roles}} for _, _, _, name, why, item, cells in pick],
+          "left": len(rows) - len(pick),
+          "note": "FOCUS không khớp vùng nào" if focus and not rows else None})
+
+
+def cell_ticket(cell, tickets):
+    """`✗ qa:F3` → `✗ #45` once the finding has its ticket."""
+    def sub(m):
+        return tickets.get(m.group(0), m.group(0))
+    return re.sub(r"\b(?:qa|ux|arch|product):F\d+\b", sub, cell)
+
+
+def cmd_ledger(a):
+    amap = load_json(a.map)
+    prev_text, run_text = read_file(a.prev), read_file(a.run)
+    prev, prev_roles = coverage_of(prev_text)
+    run, run_roles = coverage_of(run_text)
+    roles = run_roles or prev_roles or [r["role"] for r in amap.get("roles", [])][:8]
+    tickets = {}
+    for pair in (a.tickets or "").split(","):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            tickets[k.strip()] = v.strip()
+    sha7, date = a.sha[:7], a.date or datetime.date.today().isoformat()
+    names = [i["area"] for i in amap.get("areas", [])]
+    unknown = [n for n in run if n not in names]
+    if unknown:  # a screen the map cannot see (no route): kept, but a typo of an area name would be a second row
+        sys.stderr.write("vùng không có trong map (giữ thành dòng riêng): %s\n" % ", ".join(unknown))
+    names += unknown
+    table, covered, roles_hit = [], 0, set()
+    for name in names:
+        old, new = prev.get(name), run.get(name)
+        cells, last = {}, ""
+        for r in roles:
+            cell = (new or {}).get("cells", {}).get(r) or "·"
+            if cell == "·" and old:
+                cell = old["cells"].get(r, "·")
+            cells[r] = cell_ticket(cell, tickets)
+        if new:
+            last = "@%s %s" % (sha7, date)
+        elif old and old["sha"]:
+            last = "@%s %s" % (old["sha"][:7], old["date"])
+        hit = [r for r in roles if cells[r].startswith(TESTED)]
+        covered += 1 if hit else 0
+        roles_hit.update(hit)
+        table.append("| %s | %s | %s |" % (name, " | ".join(cells[r] for r in roles), last or "—"))
+    before = sum(1 for n in names if any(c.startswith(TESTED) for c in (prev.get(n) or {}).get("cells", {}).values()))
+    verified = re.findall(r"#\d+\s*(✓|✗)", section(run_text, VERIFY_HEAD))
+    ok, bad = verified.count("✓"), verified.count("✗")
+    index = load_json(a.index) if a.index else {}
+    sev = index.get("by_sev", {})
+    regressed = sum(1 for f in index.get("findings", []) if f.get("regressed"))
+    total = len(names) or 1
+    hist_head, hist_rows = parse_table(section(prev_text, HEALTH_HEAD))
+    row = "| %s | @%s | %d/%d (%d%%) | %d/%d | %d | %d | %d | %d | %s |" % (
+        date, sha7, covered, len(names), round(100.0 * covered / total), len(roles_hit), len(roles),
+        sev.get("cao", 0), sev.get("vừa", 0), sev.get("thấp", 0), regressed, ("%d/%d" % (ok, ok + bad)) if ok + bad else "—")
+    history = ["| " + " | ".join(r) + " |" for r in hist_rows if len(r) >= 9][-9:]
+    out = ["## %s" % HEALTH_HEAD, "",
+           "Phủ vùng %d/%d → %d/%d · role đã test %d/%d (%s) · xác minh sửa %d ✓ %d ✗" % (
+               before, len(names), covered, len(names), len(roles_hit), len(roles), ", ".join(sorted(roles_hit)) or "—", ok, bad), "",
+           "| Ngày | @sha | Vùng đã phủ | Role | Cao | Vừa | Thấp | Tái phát | Xác minh sửa |",
+           "|---|---|---|---|---|---|---|---|---|"] + history + [row, "",
+           "## %s" % COVER_HEAD, "",
+           "`✓` đạt · `✗ #n` lỗi · `⛔` bị chặn đúng quyền · `·` chưa test · `—` không áp dụng", "",
+           "| Vùng | %s | %s |" % (" | ".join(roles), LAST), "|---|%s---|" % ("---|" * len(roles))] + table
+    print("\n".join(out))
+
+
 # ── findings ────────────────────────────────────────────────────────────────
 
 FINDING = re.compile(r"^## (F\d+)\.\s+(.+?)\s*$", re.M)
 META = re.compile(r"^- (\w+):\s*(.*?)\s*$")
-LENS = re.compile(r"^# audit (qa|arch|product)\b", re.M)
+LENS_ORDER = ("qa", "ux", "product", "arch")  # the order the panel speaks in a merged ticket
+LENS = re.compile(r"^# audit (qa|ux|arch|product)\b", re.M)
 TYPES = ("Bug", "Improvement", "Feature", "Task")
 SEV = {"cao": 0, "high": 0, "vừa": 1, "medium": 1, "thấp": 2, "low": 2}
+SEV_NAME = {0: "cao", 1: "vừa", 2: "thấp"}
 EFFORT = {"S": 0, "M": 1, "L": 2}
-FP = re.compile(r"^(qa|arch|product)(/[a-z0-9][a-z0-9._-]*){2,}$")
+FP = re.compile(r"^(qa|ux|arch|product)(/[a-z0-9][a-z0-9._-]*){2,}$")
+TARGET = re.compile(r"^(qa|ux|arch|product):F\d+$")
 REQUIRED = ("fp", "type", "sev", "effort", "evidence")
 BODY_MAX = 8000
+EXTEND_MAX = 2500  # an expert's view added to another finding: a section, not a second ticket
 
 
 def parse_findings(path, platforms):
@@ -725,7 +1352,7 @@ def parse_findings(path, platforms):
     heads = list(FINDING.finditer(text))
     out, errors, seen = [], [], set()
     if not head:
-        errors.append({"file": path, "error": "thiếu dòng đầu `# audit <qa|arch|product> · …`"})
+        errors.append({"file": path, "error": "thiếu dòng đầu `# audit <qa|ux|arch|product> · …`"})
     for i, m in enumerate(heads):
         block = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip("\n").split("\n")
         meta, j = {}, 0
@@ -735,7 +1362,13 @@ def parse_findings(path, platforms):
             j += 1
         body = re.split(r"^## ", "\n".join(block[j:]), flags=re.M)[0].strip()  # a later `## …` section belongs to the file
         fid = "%s:%s" % (lens or "?", m.group(1))
-        problems = ["thiếu `- %s:`" % k for k in REQUIRED if not meta.get(k)]
+        extends = meta.get("extends", "")
+        required = ("evidence",) if extends else REQUIRED
+        problems = ["thiếu `- %s:`" % k for k in required if not meta.get(k)]
+        if extends and not TARGET.match(extends):
+            problems.append("extends `%s` phải là <lens>:F<k>" % extends)
+        elif extends and extends.split(":")[0] == lens:
+            problems.append("extends chỉ trỏ phát hiện của lăng kính khác")
         if meta.get("type") and meta["type"] not in TYPES:
             problems.append("type phải là %s" % " | ".join(TYPES))
         if meta.get("sev") and meta["sev"].lower() not in SEV:
@@ -751,10 +1384,13 @@ def parse_findings(path, platforms):
         bad = [p for p in plats if platforms and p not in platforms]
         if bad:
             problems.append("platform %s không phải key của labels.platform (%s)" % (",".join(bad), ",".join(platforms)))
-        if "- [ ]" not in body:
+        if not extends and "- [ ]" not in body:
             problems.append("body thiếu tiêu chí nghiệm thu `- [ ]`")
-        if len(body) > BODY_MAX:
-            problems.append("body %d ký tự > %d — rút gọn" % (len(body), BODY_MAX))
+        if extends and not body:
+            problems.append("extends cần một đoạn góc nhìn (`### …`)")
+        limit = EXTEND_MAX if extends else BODY_MAX
+        if len(body) > limit:
+            problems.append("body %d ký tự > %d — rút gọn" % (len(body), limit))
         if "agentflow:state" in body:
             problems.append("body không được chứa state block")
         if len(m.group(2)) > 90:
@@ -765,8 +1401,14 @@ def parse_findings(path, platforms):
         if problems:
             errors.append({"file": path, "id": fid, "error": "; ".join(problems)})
             continue
-        item = {"id": fid, "lens": lens, "title": m.group(2), "type": meta["type"], "sev": meta["sev"].lower(),
-                "effort": meta["effort"].upper(), "platform": plats, "fp": fp, "evidence": meta["evidence"], "body": body}
+        item = {"id": fid, "lens": lens, "title": m.group(2), "platform": plats, "evidence": meta["evidence"], "body": body,
+                "roles": [r.strip() for r in meta.get("role", "").split(",") if r.strip()]}
+        if extends:
+            item["extends"] = extends
+            if meta.get("sev"):
+                item["sev"] = meta["sev"].lower()
+        else:
+            item.update({"type": meta["type"], "sev": meta["sev"].lower(), "effort": meta["effort"].upper(), "fp": fp})
         for key in ("regressed", "score"):
             if meta.get(key):
                 item[key] = meta[key]
@@ -783,6 +1425,39 @@ def score_of(item):
         return 0.0
 
 
+def join_panel(items, errors):
+    """Fold every `extends` view into the finding it names: its section joins the body, its lens the panel, a higher
+    sev it argues for raises the finding's."""
+    by_id = {i["id"]: i for i in items if "extends" not in i}
+    views = sorted((i for i in items if "extends" in i), key=lambda i: (LENS_ORDER.index(i["lens"]), i["id"]))
+    for view in views:
+        target = by_id.get(view["extends"])
+        if not target:
+            errors.append({"id": view["id"], "error": "extends %s: không có phát hiện đó (hoặc nó lỗi dạng)" % view["extends"]})
+            continue
+        target["body"] += "\n\n" + view["body"]
+        target.setdefault("panel", [target["lens"]])
+        if view["lens"] not in target["panel"]:
+            target["panel"].append(view["lens"])
+        target.setdefault("views", []).append(view["id"])
+        for plat in view["platform"]:
+            if plat not in target["platform"]:
+                target["platform"].append(plat)
+        for role in view["roles"]:
+            if role not in target["roles"]:
+                target["roles"].append(role)
+        if view.get("sev") and SEV[view["sev"]] < SEV[target["sev"]]:
+            target["sev_from"] = "%s → %s (%s)" % (target["sev"], SEV_NAME[SEV[view["sev"]]], view["id"])
+            target["sev"] = SEV_NAME[SEV[view["sev"]]]
+    return list(by_id.values())
+
+
+def rank(item):
+    """sev → regressed → seen by more experts → cheaper → RICE."""
+    regressed = 0 if item.get("regressed") else 1
+    return SEV[item["sev"]], regressed, -len(item.get("panel", [])), EFFORT[item["effort"]], -score_of(item), item["id"]
+
+
 def cmd_findings(a):
     platforms = []
     root = afconfig.repo_root()
@@ -796,6 +1471,7 @@ def cmd_findings(a):
         found, bad = parse_findings(path, platforms)
         items += found
         errors += bad
+    items = join_panel(items, errors)
     if a.body:
         hit = next((i for i in items if i["id"] == a.body), None)
         if not hit:
@@ -809,9 +1485,11 @@ def cmd_findings(a):
             kept.setdefault("also", []).append(item["id"])
             continue
         merged[item["fp"]] = item
-    ranked = sorted(merged.values(), key=lambda i: (SEV[i["sev"]], 0 if i.get("regressed") else 1, EFFORT[i["effort"]], -score_of(i), i["id"]))
+    ranked = sorted(merged.values(), key=rank)
     counts = collections.Counter(i["sev"] for i in ranked)
+    roles = collections.Counter(r for i in ranked for r in i["roles"])
     emit({"count": len(ranked), "by_sev": dict(counts), "by_lens": dict(collections.Counter(i["lens"] for i in ranked)),
+          "by_role": dict(roles), "panel": sum(1 for i in ranked if len(i.get("panel", [])) > 1),
           "findings": [{k: v for k, v in i.items() if k != "body"} for i in ranked], "errors": errors}, 1 if errors else 0)
 
 
@@ -825,11 +1503,28 @@ def main(argv=None):
     s.add_argument("paths", nargs="*")
     s = sub.add_parser("flows", help="kiểm kê + soát độ vững của automation e2e")
     s.add_argument("paths", nargs="*")
+    s = sub.add_parser("map", help="kiểm kê toàn sản phẩm: màn, endpoint, role, tài khoản test, vùng của bản đồ phủ")
+    s.add_argument("--max-areas", type=int, default=250, help="số vùng tối đa của bản đồ phủ (mặc định 250)")
+    s.add_argument("paths", nargs="*")
+    s = sub.add_parser("plan", help="vùng nên test lượt này theo bản đồ phủ lần trước")
+    s.add_argument("--map", required=True, help="JSON của `map`")
+    s.add_argument("--prev", help="body issue checklist lần trước (có `## Bản đồ phủ`)")
+    s.add_argument("--closed", help="số ticket đã đóng, phẩy: vùng có lỗi đó cần xác minh sửa")
+    s.add_argument("--focus", help="chỉ vùng có tên hoặc file chứa chuỗi này")
+    s.add_argument("--max", type=int, default=15, help="số vùng tối đa (0 = tất cả; mặc định 15)")
+    s = sub.add_parser("ledger", help="markdown Sức khoẻ + Bản đồ phủ cho issue checklist")
+    s.add_argument("--map", required=True)
+    s.add_argument("--run", help="bảng phủ của lượt này (qa viết); không có = lượt chỉ soát tĩnh")
+    s.add_argument("--sha", required=True)
+    s.add_argument("--prev")
+    s.add_argument("--index", help="JSON của `findings` (đếm mức độ, tái phát)")
+    s.add_argument("--tickets", help="id phát hiện → ticket, vd qa:F1=#45,ux:F2=#46")
+    s.add_argument("--date")
     s = sub.add_parser("findings", help="kiểm + gộp file phát hiện của auditor")
     s.add_argument("files", nargs="+")
     s.add_argument("--body", help="in body ticket của một mục, vd qa:F2")
     a = p.parse_args(argv)
-    {"scan": cmd_scan, "flows": cmd_flows, "findings": cmd_findings}[a.cmd](a)
+    {"scan": cmd_scan, "flows": cmd_flows, "map": cmd_map, "plan": cmd_plan, "ledger": cmd_ledger, "findings": cmd_findings}[a.cmd](a)
 
 
 if __name__ == "__main__":

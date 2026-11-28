@@ -47,14 +47,26 @@ import afconfig  # noqa: E402
 # 3.12 (deploy only what staging lacks, decided by agentflow-board; the app for a person's QC only for an item that needs it,
 # one platform when one is enough; SA settles the staging data; never the whole suite) keeps every budget: the deploy rule
 # moved into tested code and the prompts were trimmed by what they gained.
+# 3.13 (SA reviews the code before staging, precheck + red-before-green gate, SA code map, DEV runs split by design step,
+# the orchestrator waits on the pipeline, metrics) adds ~2.6k to an SA spawn, ~3.3k to a DEV spawn, ~0.9k to the orchestrator.
+# Measured on 16 foxygym tickets (agentflow-metrics, 14 days): 69% of the cost is cache reads (turns × context), the prompts
+# ~5%; a rejected review round cost ~5M token-eq (rework + deploy + verify + review) and tickets averaged 2.4 reviews, while
+# the added prompt costs ~0.3% of a DEV spawn. Review before staging turns a ❌ into one DEV turn; the gates and lessons in
+# engineering.md/automation.md target the journal's repeated review ❌ (flow green without the change, missed display sites).
+# 3.14 (/agentflow:checklist tests the whole product role by role with a panel: map/plan/ledger of a coverage map kept on
+# GitHub, qa runs area × role and writes an evidence pack, ux/product/arch read it and add views to qa's findings) adds
+# audit-ux.md and ~1.5k to each other audit file, ~2.6k to the command. No ticket spawn reads them; the qa audit spawn
+# grows ~3.4k (the role matrix, fix verification, evidence pack), small next to the flows, logs and ≤ 40 images it reads.
+# 3.14 also adds /agentflow:distribute (~4.5k, read only when the maintainer releases; the mechanics are in
+# bin/agentflow-distribute) and shortens /learn's release step to that script.
 BUDGETS = {
-    "agents/sa.md": 10500, "agents/dev.md": 13200,
-    "references/protocol.md": 13550, "references/dispatch.md": 9750, "references/design.md": 2600, "references/automation.md": 7100,
-    "references/engineering.md": 3000, "references/clarify.md": 6650,
+    "agents/sa.md": 11900, "agents/dev.md": 14650,
+    "references/protocol.md": 14450, "references/dispatch.md": 10700, "references/design.md": 2600, "references/automation.md": 7850,
+    "references/engineering.md": 3250, "references/clarify.md": 6650,
     "skills/init/SKILL.md": 11300, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 3000, "skills/doctor/SKILL.md": 2000,
-    "skills/run/SKILL.md": 2400, "skills/status/SKILL.md": 2850, "skills/task/SKILL.md": 10150, "skills/init/references/board-setup.md": 5550,
-    "agents/audit.md": 4400, "references/audit-qa.md": 4800, "references/audit-arch.md": 3750, "references/audit-product.md": 2850,
-    "skills/checklist/SKILL.md": 6050,
+    "skills/run/SKILL.md": 2450, "skills/status/SKILL.md": 3000, "skills/task/SKILL.md": 10150, "skills/init/references/board-setup.md": 5550,
+    "agents/audit.md": 6000, "references/audit-qa.md": 6750, "references/audit-arch.md": 4550, "references/audit-product.md": 3500,
+    "references/audit-ux.md": 3800, "skills/checklist/SKILL.md": 8750, "skills/distribute/SKILL.md": 4600,
 }
 # What a spawn reads before it looks at the ticket: its prompt, the protocol and the references it always reads.
 # 2.x DEV paid 9.3k + 12.1k + 8.3k (it read the reviewer prompt to self-review); the shared engineering.md replaced that.
@@ -62,7 +74,7 @@ BUDGETS = {
 # The auditor reads one lens a spawn: qa (its reference + automation.md) is the costliest.
 SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"],
                "audit": ["references/audit-qa.md", "references/automation.md"]}
-PER_SPAWN_LIMIT = {"sa": 27000, "dev": 36750, "audit": 29650}
+PER_SPAWN_LIMIT = {"sa": 29600, "dev": 40150, "audit": 34900}
 DESCRIPTION_LIMIT = 700
 
 
@@ -98,8 +110,8 @@ def headings(rel):
 
 TEMPLATE = afconfig.parse_yaml(read("agentflow.yaml"))
 AGENTS = ["sa", "dev", "audit"]
-SKILLS = ["checklist", "do", "doctor", "init", "learn", "run", "status", "task"]
-LENSES = ["qa", "arch", "product"]
+SKILLS = ["checklist", "distribute", "do", "doctor", "init", "learn", "run", "status", "task"]
+LENSES = ["qa", "ux", "arch", "product"]
 
 
 class Budget(unittest.TestCase):
@@ -412,9 +424,9 @@ class StateMachine(unittest.TestCase):
         # 3.0: SA thiết kế (rủi ro + test case) → DEV code + automation + staging → SA review → QC người khi cần
         ("agents/sa.md", r"\*\*Rủi ro\*\*", "SA đánh giá rủi ro lúc thiết kế"),
         ("agents/sa.md", r"\*\*Test case\*\* \(bảng", "SA lập test case cần kiểm chứng"),
-        ("agents/sa.md", r"Head ≠ `test_sha` ⇒ \*\*không review\*\*: ❌", "SA không review head chưa chạy flow trên staging"),
+        ("agents/sa.md", r"head ≠ `test_sha` ⇒ \*\*không review\*\*: ❌", "SA không review head chưa chạy flow trên staging"),
         ("agents/sa.md", r"escalate: `· escalated`", "escalate thì dừng chain, không spawn DEV ngay"),
-        ("agents/dev.md", r"Chạy khi head PR ≠ `test_sha`", "không ghi test_sha cho head chưa chạy flow"),
+        ("agents/dev.md", r"\*\*Giao SA chốt\*\* \(mọi flow liên quan pass trên head PR", "không ghi test_sha cho head chưa chạy flow"),
         ("agents/dev.md", r"kể cả khi merge `Already up to date`", "resume sau khi chết lúc chờ pipeline vẫn chờ deploy"),
         ("agents/dev.md", r"Bash `timeout: 170000`", "lệnh chờ pipeline xong trước mốc 180 giây harness đẩy nền"),
         ("references/protocol.md", r"`\[AF:DEV\] fixed\|reply` mới hơn", "DEV trả lời không sửa code vẫn là vòng mới"),
@@ -432,7 +444,7 @@ class StateMachine(unittest.TestCase):
         ("agents/dev.md", r"Ô `wipe`.*theo mục Dữ liệu staging của thiết kế.*chỉ ở lần deploy đầu của lượt", "wipe theo SA, không lặp ở vòng sửa"),
         ("agents/dev.md", r"Tối đa `run.max_test_rounds` vòng", "vòng sửa test có trần"),
         ("agents/dev.md", r"\*\*Lỗi block\*\*.*`\[AF:DEV\] blocked`", "hết vòng thì ghi lỗi block lên issue"),
-        ("agents/dev.md", r"gắn `blocked`, giữ `in_progress`, mention `people.po`", "lỗi block báo PO"),
+        ("agents/dev.md", r"gắn `blocked`, giữ Status, mention `people.po`", "lỗi block báo PO"),
         ("agents/dev.md", r"không viết unit/integration test có mock", "plugin không viết mock test"),
         ("agents/dev.md", r"`test_sha: <head>`", "DEV ghi head đã test cho SA"),
         ("references/automation.md", r"\*\*Chọn flow liên quan\*\*.*Không chạy cả suite\.", "chỉ chạy flow liên quan, không cả suite"),
@@ -442,9 +454,9 @@ class StateMachine(unittest.TestCase):
         ("agents/sa.md", r"`only: web` \(chỉ chạm backend\) ⇒ chỉ flow web", "diff chỉ chạm backend thì regression chỉ trên web"),
         ("references/automation.md", r"đúng mục \*\*Regression\*\* của `\[AF:SA\] design`", "DEV chạy đúng danh sách SA chốt"),
         ("references/automation.md", r"head cuối chạy thêm `--repeat 2`", "flow mới chạy 1 lần khi sửa, thêm 2 lần ở head cuối"),
-        ("agents/dev.md", r"\*\*Tách lượt\*\*.*`RESULT: in_progress · verify`", "phần chạy flow ở context mới"),
+        ("agents/sa.md", r"\*\*✅ code\*\*.*`RESULT: in_review · verify`", "phần chạy flow ở context mới"),
         ("references/dispatch.md", r"RESULT `verify`.*spawn ngay DEV `MODE=verify`", "orchestrator nối lượt verify"),
-        ("references/protocol.md", r"`verify` = DEV đã code \+ deploy staging", "RESULT verify có nghĩa"),
+        ("references/protocol.md", r"`verify` = SA ✅ code, cần lượt DEV verify", "RESULT verify có nghĩa"),
         ("references/automation.md", r"không chờ release mobile", "mobile test bằng build local trỏ staging"),
         ("references/automation.md", r"Chỉ mở ảnh \(Read\) khi flow fail, cộng \*\*một\*\* ảnh cuối mỗi AC UI", "xem ảnh tiết kiệm token"),
         ("references/automation.md", r"\*\*QC tay\*\* \(chặn merge", "QC tay là cổng duy nhất của QC người"),
@@ -473,7 +485,7 @@ class StateMachine(unittest.TestCase):
         ("references/dispatch.md", r"`agentflow-base clean --issue <n>…`", "dọn worktree không mất commit chưa push"),
         ("skills/init/SKILL.md", r"git rev-parse --git-common-dir\)/info/exclude", "init không sửa .gitignore của project"),
         # 3.8: several tickets in Ready — a freed slot is filled at once; parallel DEVs share staging and the device
-        ("skills/run/SKILL.md", r"dừng ⇒ slot trống, lấp ngay, không chờ agent khác xong", "slot trống không chờ cả lô xong"),
+        ("skills/run/SKILL.md", r"dừng hay `deploying` ⇒ slot trống, lấp ngay, không chờ agent khác xong", "slot trống không chờ cả lô xong"),
         ("references/dispatch.md", r"run_in_background=<true khi parallel > 1>", "song song thật: spawn thường chặn orchestrator tới khi xong"),
         ("references/dispatch.md", r"slot trống thì lấp ngay", "song song theo slot, không theo lô"),
         ("references/automation.md", r"`run --install`.*`queued` = DEV khác đang giữ thiết bị", "một thiết bị một ticket một lúc"),
@@ -490,7 +502,17 @@ class StateMachine(unittest.TestCase):
         ("agents/audit.md", r"`agentflow-audit findings <OUT>`: exit 0", "file phát hiện đúng dạng trước khi trả về"),
         ("agents/audit.md", r"không thao tác không hoàn tác được trên staging", "audit không làm hỏng dữ liệu staging"),
         ("references/audit-qa.md", r"`--issue 0` = audit", "lượt chạy của audit tách khỏi ticket"),
-        ("references/audit-qa.md", r"≤ 30 ảnh mỗi lượt", "soi ảnh có trần token"),
+        ("references/audit-qa.md", r"≤ 25 lần chạy flow, ≤ 40 ảnh", "chạy và soi ảnh có trần token"),
+        # 3.14: whole product, every role, a panel that tests together, a coverage map that grows each run
+        ("skills/checklist/SKILL.md", r"agentflow-audit map", "kiểm kê toàn sản phẩm trước khi test"),
+        ("skills/checklist/SKILL.md", r"agentflow-audit plan .*--closed", "lượt sau xác minh lỗi đã đóng, ưu tiên vùng đổi/chưa test"),
+        ("skills/checklist/SKILL.md", r"\*\*Đợt 2 — hội chẩn\*\*", "UI/UX, Product, Engineering đọc bằng chứng của qa"),
+        ("skills/checklist/SKILL.md", r"`agentflow-audit ledger` .*`--tickets <id>=#n", "Sức khoẻ + Bản đồ phủ ghi lên issue cha"),
+        ("agents/audit.md", r"\*\*Hội chẩn\*\*.*- extends: qa:F<k>", "chuyên gia thêm góc nhìn vào mục của qa"),
+        ("references/audit-qa.md", r"\*\*Bị chặn\*\*", "role không được phép phải bị chặn ở cả UI lẫn API"),
+        ("references/audit-qa.md", r"\*\*verify #n\*\*", "lỗi đã đóng được chạy lại"),
+        ("references/audit-ux.md", r"chỉ dùng token và component đang có", "ý đẹp hơn bám hệ thiết kế"),
+        ("references/audit-arch.md", r"\*\*Nguyên nhân gốc\*\*", "Engineering lần lỗi của qa tới code"),
         ("references/audit-qa.md", r"có thể do ticket đang làm", "lỗi của ticket chưa merge không thành bug của sản phẩm"),
         ("references/audit-arch.md", r"Số đo chỉ nói \*\*chỗ cần đọc\*\*", "radar không thay cho đọc code"),
         ("references/audit-product.md", r"không gửi tên khách hàng, code, dữ liệu nội bộ", "WebSearch không lộ dữ liệu của repo"),
@@ -514,6 +536,25 @@ class StateMachine(unittest.TestCase):
         ("agents/sa.md", r"DoR, Size xét từng sub", "nhóm lớn vẫn qua DoR theo từng sub"),
         ("skills/task/SKILL.md", r"chỉ Ready khi PO chọn làm chung một PR", "cha chỉ vào pipeline khi PO chốt làm chung"),
         ("skills/do/SKILL.md", r"`in_group` ⇒ dừng", "/do không làm riêng sub của nhóm"),
+        # 3.13 (người dùng chọn 2026-11-26/27): SA review code trước staging, cổng chất lượng, DEV chia lượt, orchestrator chờ pipeline
+        ("agents/dev.md", r"§1–§6 rồi §8 giao review code, \*\*không\*\* deploy", "review code trước staging: ❌ không tốn deploy + verify"),
+        ("agents/dev.md", r"\*\*Giao review code\*\*.*`step: code`", "DEV giao SA review code"),
+        ("agents/sa.md", r"`final` mà head ≠ `test_sha` ⇒ không review: state `step: verify`", "SA không chốt head chưa chạy flow, không tính round"),
+        ("agents/sa.md", r"Review lại và `final`: chỉ diff mới", "chốt chỉ soát phần đổi sau ✅ code"),
+        ("references/dispatch.md", r"`in_review` \| `A` \+ state `step: verify`.*DEV `MODE=verify`", "verify chạy ở In Review sau ✅ code"),
+        ("references/dispatch.md", r"DEV verify giữ `in_review`: state phải có `step: final`", "no-progress guard không chặn nhầm DEV verify"),
+        ("references/dispatch.md", r'effort=<"high" khi SA MODE=review', "SA review lại chỉ phần đổi ở effort high (người dùng chọn)"),
+        ("agents/dev.md", r"\*\*Đỏ trước\*\*.*`agentflow-e2e run --baseline`", "flow mới phải fail trên bản chưa có thay đổi"),
+        ("references/automation.md", r"\*\*Đỏ trước\*\*.*`skipped`", "đỏ trước tự bỏ qua khi bản đó đã có thay đổi"),
+        ("agents/dev.md", r"`agentflow-board precheck <REPO> --issue <n> --pr <m>` phải exit 0", "cổng máy móc trước review"),
+        ("references/engineering.md", r"AC đổi định dạng, đơn vị, chuỗi ⇒ Grep mọi nơi hiển thị", "review ❌ hay gặp: sót nơi hiển thị"),
+        ("agents/sa.md", r"\*\*Bản đồ code\*\*", "SA ghi bản đồ code để DEV khỏi dò lại"),
+        ("agents/sa.md", r"chia `Lượt 1\.\.k`", "ticket lớn chia lượt DEV"),
+        ("agents/dev.md", r"`RESULT: in_progress · continue`", "DEV dừng sau mỗi lượt, context mới cho lượt kế"),
+        ("references/dispatch.md", r"RESULT `continue`.*spawn ngay DEV `MODE=resume`", "orchestrator nối lượt kế"),
+        ("agents/dev.md", r"`RESULT: in_review · deploying`", "DEV không ngồi chờ pipeline khi không build trên máy"),
+        ("references/dispatch.md", r"\*\*danh sách chờ deploy\*\*.*lấy slot kế trước ticket khác", "orchestrator chờ pipeline, ticket deploy xong được ưu tiên"),
+        ("agents/dev.md", r"Bỏ khối dưới khi state `deploy_sha` đã chứa head PR", "verify gọi lại sau deploying không deploy lại"),
     ]
 
     def test_rules_still_stated(self):

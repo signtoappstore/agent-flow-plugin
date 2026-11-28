@@ -24,7 +24,8 @@ Viết từ AC, user flow, design và rủi ro — không từ code. Mỗi AC:
 - Assert điều người dùng thấy (nội dung, thông báo, trạng thái nút, màn kế tiếp).
 - Độc lập, chạy lại được: dữ liệu tự tạo tiền tố `af-<n>-`, không phụ thuộc thứ tự flow hay dữ liệu người khác trên staging; dọn dữ liệu tự tạo, không thao tác hàng loạt.
 - Không chờ cố định: `extendedWaitUntil` (`visible:` + `timeout`), `assertVisible` / `assertNotVisible` sau mỗi hành động có kết quả; danh sách dài ⇒ `scrollUntilVisible`.
-- Dùng lại subflow sẵn có (`runFlow:` đăng nhập…); subflow mới chỉ khi ≥ 2 flow dùng.
+- Dùng lại subflow, script, fixture sẵn có (`runFlow:` đăng nhập…); mới chỉ khi ≥ 2 flow dùng.
+- Nhánh `runFlow when:` ⇒ chạy được cả hai nhánh (đổi điều kiện thì đổi nhánh sau). Case layout ⇒ chạy đúng cỡ thiết bị AC/thiết kế ghi (thiếu thì tạo simulator).
 - Không thêm dependency, không sửa config framework hay CI.
 
 ## Chạy
@@ -32,6 +33,7 @@ Viết từ AC, user flow, design và rủi ro — không từ code. Mỗi AC:
 - **Chọn flow liên quan**: flow của ticket (`tags: [af-<n>]`) + đúng mục **Regression** của `[AF:SA] design`. Diff thật chạm vùng thiết kế không nói ⇒ `agentflow-e2e select --diff origin/<base>...origin/<branch> --issue <n>`, thêm flow cần, ghi PR mục "Lệch thiết kế". Không chạy cả suite.
 - Flow mới chạy 1 lần khi viết/sửa; head cuối chạy thêm `--repeat 2` mới tính pass. Flow có sẵn 1 lần. Vòng sửa: chạy lại flow fail + flow liên quan phần vừa sửa.
 - **Web**: `url: ${STAGING_URL}`, value `staging.url`. **Mobile**: `run --install` build + cài `surfaces.<key>.install` (bản trỏ server staging) khi thiết bị chưa có đúng bản này; lúc chờ deploy chạy `run --install` không flow để build sớm. Thiếu key ⇒ dò cách build một lần theo `CLAUDE.md`/README, journal `slow` đề xuất key. `wait` báo `queued` = DEV khác đang giữ thiết bị, gọi lại; không chờ release mobile. Không có thiết bị, `maestro` hay `staging.url` ⇒ case đó thành QC tay, không phải fail.
+- **Đỏ trước** (trước khi giao review code): `agentflow-e2e run --baseline --issue <n> --dir "$WT/<surface path>" --name <key> <flow mới/đổi>` (cờ `--maestro`, `--env-file` như dưới) chạy trên bản chưa có thay đổi — web/API: staging hiện tại; mobile: bản đang cài trên thiết bị (không build). Lệnh tự trả `skipped` + lý do khi bản đó đã có commit của ticket (rework sau khi đã deploy) hay thiết bị chưa có bản cài. `wait` như dưới; mong đợi mọi flow fail ở bước assert thay đổi.
 - **Chạy**: ghi head staging (`git ls-remote origin <staging.branch>`), rồi `agentflow-e2e run --issue <n> --dir "$WT/<surface path>" --name <key> [--install] [--repeat 2] [--maestro="<cờ của surfaces.<key>.e2e>"] [--env-file <file>] <flows>` (trả ngay; web, mobile song song được; lần đầu mỗi lượt thêm `--reset`), rồi `agentflow-e2e wait --issue <n>` theo protocol §9. Chỉ đọc log của flow fail.
 
 ## Phân định fail
@@ -54,7 +56,7 @@ Flow `takeScreenshot: af-<n>-tc<j>` ở state cuối mỗi case UI (ảnh ở `o
 
 ## Framework khác của repo
 
-Surface đã dùng Playwright, Cypress, Detox… trong `e2e_dir` ⇒ theo đúng framework đó với cùng nguyên tắc: chọn bằng test id (Playwright `getByTestId`), assert web-first, không `waitForTimeout`, dữ liệu riêng, nhắm `staging.url`, lặp như §Chạy (`--repeat-each`), lệnh dài theo protocol §9.
+Surface đã dùng Playwright, Cypress, Detox… trong `e2e_dir` ⇒ theo đúng framework đó với cùng nguyên tắc: chọn bằng test id (Playwright `getByTestId`), assert web-first, không `waitForTimeout`, dữ liệu riêng, nhắm `staging.url`, lặp như §Chạy (`--repeat-each`), lệnh dài theo protocol §9; Đỏ trước = chạy test mới nhắm staging trước khi deploy (staging đã có commit của ticket ⇒ bỏ qua).
 
 ## Kiểm chứng lại (mục của PR)
 

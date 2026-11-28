@@ -16,8 +16,8 @@ Contract chung cho mọi agent và lệnh `/agentflow:*`.
 |---|---|---|
 | `backlog` | PO | Chỉ PO đưa sang `ready`: tự kéo, hoặc xác nhận trong `/agentflow:task`. |
 | `ready` | SA → DEV | SA thiết kế (giải pháp, rủi ro, test case) + gắn `labels.agent` → DEV nhận → `in_progress`. Có `qc_failed` = QC người trả về, DEV sửa trước việc mới |
-| `in_progress` | DEV | Code + flow automation, draft PR, merge lên staging, chạy flow liên quan trên staging (tự sửa ≤ `run.max_test_rounds` vòng) → `in_review`. Vẫn fail ⇒ lỗi block lên issue + `blocked` |
-| `in_review` | SA | ❌ → `in_progress` + `changes_requested` · ✅: PR có mục QC tay → `in_qc` + `qc_manual`; không → undraft → `ready_to_merge` |
+| `in_progress` | DEV | Code + flow automation, flow mới đỏ trên bản chưa có thay đổi, `agentflow-board precheck`, draft PR → `in_review` (`step: code`). Thiết kế chia lượt ⇒ mỗi spawn một lượt (`part`) |
+| `in_review` | SA ↔ DEV | `step: code` — SA review code: ❌ → `in_progress` + `changes_requested` · ✅ → `step: verify` — DEV deploy staging, chạy flow liên quan (tự sửa ≤ `run.max_test_rounds` vòng; vẫn fail ⇒ lỗi block + `blocked`) → `step: final` — SA soát phần đổi từ ✅ code + kết quả flow: PR có mục QC tay → `in_qc` + `qc_manual`; không → undraft → `ready_to_merge` |
 | `in_qc` | NGƯỜI (QC) | Test mục QC tay trên staging. Pass: tick + kéo card → SYS undraft → `ready_to_merge` · fail: `qc_failed` + comment → `ready` |
 | `ready_to_merge` | NGƯỜI | PR đã undraft. Người approve + merge → `done` |
 | `done` | — | Terminal |
@@ -30,7 +30,7 @@ Contract chung cho mọi agent và lệnh `/agentflow:*`.
 
 **Góp ý của người trên PR** (thread chưa trả lời, Request changes) ở `in_review`, `in_qc`, `ready_to_merge` ⇒ PR về draft, `in_progress` + `changes_requested`.
 
-**Label rework**: `changes_requested` do SA (hoặc người) gắn; `qc_failed` do QC người gắn; SA gỡ cả hai khi ✅. `qc_manual` do SA ✅ gắn, gỡ khi ticket rời `in_qc`.
+**Label rework**: `changes_requested` do SA (hoặc người) gắn; `qc_failed` do QC người gắn; SA gỡ cả hai khi ✅ chốt. `qc_manual` do SA ✅ chốt gắn, gỡ khi ticket rời `in_qc`.
 
 ## 3. Board call (GitHub MCP)
 
@@ -59,17 +59,15 @@ review_round: 0
 qc_round: 1
 pr: 57
 branch: feat/42-csv-export
-deploy_sha: 9ce01d2
-deploy_at: 2026-10-30T08:02:00Z
+step: final
+approved: 3f2a9c1
 test_sha: 3f2a9c1
-review_sha: 3f2a9c1
-fb: 2026-10-30T08:12:00Z
-next: Review PR #57
+next: SA chốt PR #57
 -->
 ```
 
 - `review_round` = số ❌ review liên tiếp, reset `0` khi review ✅. `qc_round` = số lần QC người fail. Cả hai reset `0` khi tới `ready_to_merge` và khi escalate (§7).
-- `design` = sha base lúc SA thiết kế (`[AF:SA] design`). `deploy_sha` = commit merge DEV push lên staging, `deploy_at` = lúc push (tính timeout), `deploy_wait: false` = không có pipeline để chờ. `qc_release` = ô workflow cần bật cho bản cài QC tay (DEV quyết, orchestrator phát lúc `in_qc`). `test_sha` = head PR mà flow liên quan đã pass trên staging. `review_sha` = head SA phán gần nhất (review lại chỉ soát `review_sha..HEAD`). `fb` = mốc góp ý của người trên PR mới nhất DEV đã xử lý. `group` (chỉ ở cha) = các sub làm chung, SA chốt lúc thiết kế. `plan` (chế độ ask, `clarify.md`) = `options` · `confirm` · `ok`. Thiếu key ⇒ ticket của bản cũ: coi như `0` / không có; key lạ bỏ qua.
+- `design` = sha base lúc SA thiết kế (`[AF:SA] design`). `deploy_sha` = commit merge DEV push lên staging, `deploy_at` = lúc push (tính timeout), `deploy_wait: false` = không có pipeline để chờ. `qc_release` = ô workflow cần bật cho bản cài QC tay (DEV quyết, orchestrator phát lúc `in_qc`). `test_sha` = head PR mà flow liên quan đã pass trên staging. `review_sha` = head SA phán gần nhất (review lại chỉ soát `review_sha..HEAD`). `approved` = head SA ✅ code gần nhất. `step` (ở `in_review`) = `code` · `verify` · `final` (§2); thiếu = ticket bản cũ đã chạy flow: SA review đủ rồi chốt. `part` = `<k>/<n>` lượt DEV đã xong của thiết kế chia lượt. `fb` = mốc góp ý của người trên PR mới nhất DEV đã xử lý. `group` (chỉ ở cha) = các sub làm chung, SA chốt lúc thiết kế. `plan` (chế độ ask, `clarify.md`) = `options` · `confirm` · `ok`. Thiếu key ⇒ ticket của bản cũ: coi như `0` / không có; key lạ bỏ qua.
 - Upsert: `issue_read method=get` → trong block chỉ **sửa/thêm các key bạn đổi, giữ nguyên mọi key khác** (chưa có block thì nối vào cuối body) → `issue_write method=update` cả body. **Ngay trước khi ghi đọc lại body**; phần ngoài block đổi so với lúc đọc ⇒ người đang sửa: không ghi đè, comment `[AF:SYS] abort` rồi dừng.
 
 ## 5. Comment
@@ -81,10 +79,10 @@ Dòng đầu cố định `[AF:<ROLE>] <event>` (máy đọc), phần sau viết
 | `[AF:SPEC] created` · `[AF:SPEC] refined` | `/task` tạo / hoàn thiện issue |
 | `[AF:SA] design @<sha>` | thiết kế giải pháp + rủi ro + test case |
 | `[AF:SA] options @<sha>` | phương án cho người chọn (chế độ ask) |
-| `[AF:DEV] start` · `[AF:DEV] pr #<m> @<sha>` · `[AF:DEV] fixed @<sha>` · `[AF:DEV] reply` | nhận việc · flow pass trên staging, giao review · đã sửa + test lại · trả lời góp ý, không đổi code |
+| `[AF:DEV] start` · `[AF:DEV] pr #<m> @<sha>` · `[AF:DEV] fixed @<sha>` · `[AF:DEV] reply` · `[AF:DEV] staging @<sha>` | nhận việc · giao review code · đã sửa, giao review lại · trả lời góp ý, không đổi code · flow pass trên staging, giao SA chốt |
 | `[AF:SA] ?` · `[AF:DEV] ?` | câu hỏi cho người (đi kèm `needs_info`) |
 | `[AF:DEV] blocked` | môi trường/pipeline hỏng, conflict staging, hoặc lỗi block sau các vòng sửa (đi kèm `blocked`) |
-| `[AF:SA] ✅ @<sha>` · `[AF:SA] ❌ @<sha>` | verdict review (list lỗi đánh số, trích `file:line`). Bản cũ viết `[AF:REVIEW]`: đọc như `[AF:SA]`; `[AF:QC] ❌` (QC agent trước 3.0): đọc như lỗi của QC người |
+| `[AF:SA] ✅ code @<sha>` · `[AF:SA] ✅ @<sha>` · `[AF:SA] ❌ @<sha>` | verdict: code đạt, sang deploy · chốt · trả về (list lỗi đánh số, trích `file:line`). Bản cũ viết `[AF:REVIEW]`: đọc như `[AF:SA]`; `[AF:QC] ❌` (QC agent trước 3.0): đọc như lỗi của QC người |
 | `[AF:SA] blocked` | PR đã đóng (đi kèm `blocked`) |
 | `[AF:SYS] <event>` | sự kiện hệ thống: `escalated` · `done` · `abort` · `stuck` · `feedback` · `requeue` · `qc-failed` (QC người fail) · `qc-manual-pass` (QC người pass) · `decision` (lời người nhập trong terminal, đọc như comment của người) · `confirmed` (người xác nhận kế hoạch) · `qc-build` (bản app cho QC người) |
 
@@ -96,7 +94,7 @@ Agent dùng token của người dùng ⇒ cùng login: **prefix là cách duy n
 
 1. State block (§4) → 2. comment (§5) → 3. label (`issue_write labels` = full set) → (đổi draft của PR nếu có) → 4. **Status write — cuối cùng, commit point**.
 
-**Trước bước 1**: đọc lại Status; khác Status mà chính run này ghi gần nhất (chưa ghi lần nào ⇒ `STAGE` lúc nhận việc) ⇒ người đã kéo card: chưa ghi gì cả, chỉ comment `[AF:SYS] abort`, dừng. Status write fail ⇒ dừng và báo. Crash trước bước 4 ⇒ chạy lại an toàn: verdict của đúng `@<sha>` này đã có, chưa có `[AF:DEV] fixed|reply` mới hơn ⇒ không post lại; `review_sha` đã bằng sha ⇒ round đã tính, không tăng lần nữa; chưa bằng ⇒ tăng rồi làm nốt. Có `fixed` mà head không đổi = DEV không sửa gì: tính là một vòng ❌ mới.
+**Trước bước 1**: đọc lại Status; khác Status mà chính run này ghi gần nhất (chưa ghi lần nào ⇒ `STAGE` lúc nhận việc) ⇒ người đã kéo card: chưa ghi gì cả, chỉ comment `[AF:SYS] abort`, dừng. Status write fail ⇒ dừng và báo. Crash trước bước 4 ⇒ chạy lại an toàn: verdict cùng loại (code / chốt) của đúng `@<sha>` này đã có, chưa có `[AF:DEV] fixed|reply` mới hơn ⇒ không post lại; `review_sha` đã bằng sha ⇒ round đã tính, không tăng lần nữa; chưa bằng ⇒ tăng rồi làm nốt. Có `fixed` mà head không đổi = DEV không sửa gì: tính là một vòng ❌ mới.
 
 ## 7. Escalation
 
@@ -113,6 +111,8 @@ Agent dùng token của người dùng ⇒ cùng login: **prefix là cách duy n
 ## 9. Tiết kiệm token (bắt buộc)
 
 - Lệnh output dài (install, build, test, flow) → ghi log: `cmd > /tmp/af-<n>.log 2>&1; echo "exit $?"; tail -40 /tmp/af-<n>.log` — chỉ xem phần đuôi khi fail.
+- Mỗi lượt đọc lại cả context: số lượt là chi phí chính. Dò nhiều chỗ ⇒ gộp một lệnh (`git grep -n -e A -e B`, nhiều `sed -n` nối `;`) hoặc gọi các tool độc lập song song trong một lượt.
+- `issue_read` lỗi output schema ⇒ đọc bằng `gh issue view <n> --json body,labels,comments`, không thử lại.
 - Lệnh check/test/e2e/install lấy từ `surfaces.<key>.*`, không dò `package.json`/CI. Thiếu thì dò một lần, journal `kind=slow` đề xuất thêm vào config.
 - Đọc file theo phần (`offset`/`limit`), dùng Grep trước khi Read. Không Read lại file vừa sửa.
 - Diff: `git diff --stat` trước, chỉ mở file liên quan AC.
@@ -143,9 +143,9 @@ Không in/echo token, không Read/sửa path `forbidden` (mặc định `.claude
 Subagent kết thúc bằng đúng khối này (orchestrator chỉ đọc khối này, không đọc narrative; hook trả agent về nếu thiếu):
 
 ```
-RESULT: <stage hiện tại> · <ok|verify|decide|waiting_human|needs_info|blocked|escalated|abort>
+RESULT: <stage hiện tại> · <ok|verify|continue|deploying|decide|waiting_human|needs_info|blocked|escalated|abort>
 PR: #<m> @<sha>        (bỏ nếu không có)
 NOTE: <≤ 2 dòng: đã làm gì / người cần làm gì>
 ```
 
-`ok` = đã chuyển sang stage kế · `verify` = DEV đã code + deploy staging, cần lượt verify · `decide` = chờ người chọn phương án / xác nhận kế hoạch · `waiting_human` = dừng đúng chỗ chờ người, Status giữ nguyên là bình thường (vd chờ QC người ở `in_qc`).
+`ok` = đã chuyển sang stage/`step` kế · `verify` = SA ✅ code, cần lượt DEV verify · `continue` = DEV xong một lượt, còn lượt kế · `deploying` = DEV đã deploy, chờ pipeline · `decide` = chờ người chọn phương án / xác nhận kế hoạch · `waiting_human` = dừng đúng chỗ chờ người, Status giữ nguyên là bình thường (vd chờ QC người ở `in_qc`).

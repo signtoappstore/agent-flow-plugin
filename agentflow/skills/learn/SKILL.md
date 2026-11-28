@@ -72,5 +72,5 @@ Trình **một lần**: danh sách bài học → file → diff → mức bump (
 2. `claude plugin validate "$SRC"` — fail → giữ edit, in lỗi, dừng.
 3. `python3 -I -m unittest discover -s "$SRC/tests"` phải pass hết trước khi phát hành. Sửa guard hoặc script → thêm case mới vào đúng file test.
 4. `agentflow-journal mark <id…> --as applied --ref v<NEW>` (và `--as dismissed` cho entry bị loại).
-5. Trừ khi `--no-release`: kiểm `git -C "$SRC" status --porcelain` (file bẩn ngoài lượt này → liệt kê, hỏi), rồi hỏi một lần và chạy `claude plugin marketplace update "$MKT" && claude plugin update "$ID"`; xác nhận version mới trong `~/.claude/plugins/installed_plugins.json`.
+5. Trừ khi `--no-release`: kiểm `git -C "$SRC" status --porcelain` (file bẩn ngoài lượt này → liệt kê, hỏi), rồi hỏi một lần và chạy `agentflow-distribute install` (mọi project đang cài) rồi `compat`; ✗ → nhắc `/agentflow:distribute` (sửa config project, phát hành).
 6. Báo: version cũ → mới, file đổi, bài học đã áp. Nhắc **restart Claude Code**. Schema đổi → nhắc chạy lại `/agentflow:init` ở mỗi repo. Hỏi (không tự làm) có commit `$SRC` với message `learn: <tóm tắt> (v<NEW>)` không. Không bao giờ push.

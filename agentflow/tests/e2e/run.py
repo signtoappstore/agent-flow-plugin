@@ -4,12 +4,13 @@ bare origin and a stateful fake GitHub. Asserts on what ended up in GitHub and i
 
   python3 agentflow/tests/e2e/run.py [--scenario new|rework|feedback|requeue|manual-pass|manual-qc|pipeline-fail|pipeline-infra|pipeline-timeout|multi] [--budget USD] [--model sonnet] [--keep]
 
-new: a fresh ticket in Ready: SA designs, DEV codes + writes the e2e test, deploys to staging, runs it, SA reviews. rework: a human QC
+new: a fresh ticket in Ready: SA designs, DEV codes + writes the e2e test (red on the old staging), SA reviews the code, DEV
+deploys to staging and runs it, SA signs off. rework: a human QC
 returned the ticket with a real bug on the PR branch, which is also on staging. feedback: at Ready to Merge a human requested
 changes, and left an inline comment that would break div. requeue: a ticket of the pre-3.0 flow waits in In QC for a build of a
 staging that a human has since reset. manual-pass: a human QC ticked the checklist and dragged the card. manual-qc: the PR asks
-for a test on a real device, so SA hands the ticket to the human QC. pipeline-fail: DEV resumes a ticket whose staging build
-fails because of this PR. pipeline-infra: it fails because of the infrastructure. pipeline-timeout: it never reports.
+for a test on a real device, so SA hands the ticket to the human QC. pipeline-fail: after SA approved the code, DEV verifies a ticket
+whose staging build fails because of this PR. pipeline-infra: it fails because of the infrastructure. pipeline-timeout: it never reports.
 multi: `/agentflow:run` with three fresh tickets in Ready and `run.parallel: 2`; each must reach Ready to Merge, and the third
 must start while one of the first two still runs (a freed slot is filled, no waiting for the whole batch).
 
@@ -197,19 +198,21 @@ def seed_scenario(scenario, repo, state):
         state["issue"]["labels"] = ["Feature", "agentflow", "qc-failed"]
         state["issue"]["body"] += state_block("ready", qc_round=1, deploy_sha=staged[:7], test_sha=short, review_sha=short)
         return
-    if scenario in ("pipeline-fail", "pipeline-infra", "pipeline-timeout"):  # DEV died while it waited for the staging build
+    if scenario in ("pipeline-fail", "pipeline-infra", "pipeline-timeout"):  # SA approved the code; DEV deployed, the build runs
+        comments += ["[AF:DEV] pr #57 @" + short, "[AF:SA] ✅ code @" + short]
         state["issue"]["comments"] = [bot(i + 1, b) for i, b in enumerate(comments)]
-        state["status"] = "In Progress"
+        state["status"] = "In Review"
         state["issue"]["labels"] = ["Feature", "agentflow"]
-        state["issue"]["body"] += state_block("in_progress", deploy_sha=staged[:7], deploy_at="2026-01-01T00:00:00Z")
+        state["issue"]["body"] += state_block("in_review", step="verify", approved=short, deploy_sha=staged[:7], deploy_at="2026-01-01T00:00:00Z")
         state["job_log"] = {"pipeline-fail": "FAIL: test_div (e2e.test_div.DivTest)\nAssertionError: 12 != 3\n  File calc.py, in div: return a * b\n",
                             "pipeline-infra": "Error: No space left on device\nThe runner has received a shutdown signal. Không liên quan tới file nào trong repo.\n"}.get(scenario)
         return
     comments.append("[AF:DEV] pr #57 @" + short)
-    if scenario == "manual-qc":
+    if scenario == "manual-qc":  # SA approved the code, DEV's flows passed on staging: SA signs off
+        comments += ["[AF:SA] ✅ code @" + short, "[AF:DEV] staging @" + short]
         state["status"] = "In Review"
         state["issue"]["labels"] = ["Feature", "agentflow"]
-        state["issue"]["body"] += state_block("in_review", deploy_sha=staged[:7], test_sha=short)
+        state["issue"]["body"] += state_block("in_review", step="final", approved=short, deploy_sha=staged[:7], test_sha=short)
     elif scenario == "requeue":
         # pre-3.0: SA deployed and the orchestrator waited for the build; a human has since reset staging
         comments += ["[AF:SA] ✅ @" + short, "[AF:SA] deployed @0000000"]
@@ -250,7 +253,7 @@ def make_plugin(base, state_path, bare):
 
 
 def serve_checks(bare, scenario, seeded_head, state_path):
-    """What `agentflow-board checks` and `feedback` read. The staging pipeline is green on whatever the head is, except in the
+    """What `agentflow-board checks`, `feedback` and `precheck` read. The staging pipeline is green on whatever the head is, except in the
     pipeline-* scenarios, where the head as seeded stays failing or silent."""
     failing = {"status": "completed", "conclusion": "failure", "name": "build", "html_url": "http://local/1"}
     release = {"status": "in_progress", "conclusion": None, "name": "distribute-mobile", "html_url": "http://local/2"}  # never waited for
@@ -280,6 +283,19 @@ def serve_checks(bare, scenario, seeded_head, state_path):
                     body, code = {"total_count": 0, "statuses": []}, 200
                 elif rest.startswith("commits/"):
                     body, code = {"sha": git(bare, "rev-parse", rest.split("/", 1)[1])}, 200
+                elif re.fullmatch(r"(issues|pulls)/\d+(/comments)?", rest):  # agentflow-board precheck
+                    with open(state_path, encoding="utf-8") as fh:
+                        state = json.load(fh)
+                    kind, n = rest.split("/")[0], int(rest.split("/")[1])
+                    t = fake_github.ticket(state, **({"pr": n} if kind == "pulls" else {"issue": n}))
+                    pr = t.get("pr") or {}
+                    if kind == "pulls" and pr:
+                        body, code = {"state": pr["state"], "draft": pr["draft"], "base": {"ref": pr["base"]}, "body": pr["body"],
+                                      "mergeable": True, "mergeable_state": "clean", "head": {"sha": git(bare, "rev-parse", pr["head"])}}, 200
+                    elif rest.endswith("/comments"):
+                        body, code = t["issue"]["comments"], 200
+                    elif kind == "issues":
+                        body, code = {"body": t["issue"]["body"]}, 200
                 elif rest.startswith("compare/"):
                     base, head = rest.split("/", 1)[1].split("...")
                     ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", base, head], cwd=bare, capture_output=True).returncode == 0
@@ -417,9 +433,9 @@ def assertions(state, repo, bare, master_before, scenario="new", log=None, statu
     if scenario in ("pipeline-infra", "pipeline-timeout"):
         return safe + [("ghi lỗi block lên issue", has("[AF:DEV] blocked"), heads),
                        ("gắn blocked, chờ người", "blocked" in labels, labels),
-                       ("đứng nguyên cột", state["status"] == "In Progress", state["status"]),
+                       ("đứng nguyên cột", state["status"] == "In Review", state["status"]),
                        ("không tính vào round", "review_round: 0" in state["issue"]["body"] and "qc_round: 0" in state["issue"]["body"], ""),
-                       ("không giao review khi chưa test", not has("[AF:DEV] pr"), heads),
+                       ("không giao SA chốt khi chưa test", not has("[AF:DEV] staging"), heads),
                        ("không undraft", pr.get("draft") is True, pr.get("draft"))]
     final = "In QC" if scenario == "rework" else "Ready to Merge"
     extra = []
@@ -428,7 +444,8 @@ def assertions(state, repo, bare, master_before, scenario="new", log=None, statu
         changed = git(bare, "diff", "--name-only", "master..." + head).split() if head else []
         extra = [("SA thiết kế và nhận ticket trước khi DEV code", first("[AF:SA] design") < first("[AF:DEV] start"), heads),
                  ("SA không thiết kế lại khi review", sum(h.startswith("[AF:SA] design") for h in heads) == 1, heads),
-                 ("DEV giao review sau khi chạy test", first("[AF:DEV] pr") < first("[AF:SA] ✅"), heads),
+                 ("SA review code trước khi DEV lên staging", first("[AF:DEV] pr") < first("[AF:SA] ✅ code") < first("[AF:DEV] staging"), heads),
+                 ("SA chốt sau khi flow pass", first("[AF:DEV] staging") < max((i for i, h in enumerate(heads) if h.startswith("[AF:SA] ✅ @")), default=-1), heads),
                  ("test tự động nằm trong e2e_dir", any(f.startswith("e2e/") for f in changed), changed),
                  ("không viết unit test mới ngoài e2e_dir", not any(f.startswith("test_") for f in changed), changed)]
     if scenario == "pipeline-fail":

@@ -9,6 +9,10 @@ every poll after that is a turn that re-reads the whole context — so runs are 
                                                                             of a turn) drops the issue's earlier runs; --install
                                                                             builds + installs surfaces.<name>.install first when
                                                                             the device does not hold this build yet
+  run --baseline --issue N --dir DIR [--name X] FLOW...                     red before green: the same run on a build without
+                                                                            the ticket's change (staging head for web/API, the
+                                                                            build the device holds); `baseline: skipped` + why
+                                                                            when that build already has a commit of the ticket
   wait --issue N [--name X] [--max SEC]     until the runs end or SEC pass (default 160); one JSON line
   wait --log FILE [--max SEC] [--tail N]    until FILE has a line `exit <code>`, for `(cmd > FILE 2>&1; echo "exit $?" >> FILE) &`
 
@@ -361,6 +365,54 @@ def install(state, folder):
     return None
 
 
+def _git(workdir, *args, timeout=30):
+    try:
+        return subprocess.run(["git", *args], cwd=workdir, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def baseline(cfg, name, workdir, surface, lock):
+    """Can the ticket's new flows run on a build without its change? → (target sha, None) or (None, why).
+    Web/API: the staging head, unless staging already merged a commit of the ticket. A device: the build it holds
+    (recorded by --install), unless that build already holds a commit of the ticket. Commits that only touch this
+    surface's flows do not count."""
+    base = afconfig.base_branch(cfg)
+    flows = os.path.join(str(surface.get("path") or ""), str(surface.get("e2e_dir") or "")).strip("/")
+    spec = ["--", ":/"] + ([":(top,exclude)%s" % flows] if surface.get("e2e_dir") else [])
+    log = _git(workdir, "log", "--format=%H", "origin/%s..HEAD" % base, *spec)
+    commits = log.stdout.split() if log and log.returncode == 0 else None
+    if not commits:
+        return None, "nhánh chưa có commit ngoài flow so với origin/%s" % base if commits == [] else "không đọc được git log"
+    if lock and surface.get("install"):
+        try:
+            with open(os.path.join(TMP, "af-device-%s.installed" % lock), encoding="utf-8") as fh:
+                have_name, _, target = fh.read().strip().partition(" ")
+        except OSError:
+            have_name, target = None, ""
+        if have_name != name or not target:
+            return None, "thiết bị chưa có bản cài nào của %s" % name
+        where = "bản đang cài"
+    elif lock:
+        return None, "surface không có install: không biết bản đang cài trên thiết bị"
+    else:
+        staging = afconfig.staging_branch(cfg)
+        if not staging:
+            return None, "thiếu staging.branch"
+        _git(workdir, "fetch", "-q", "origin", staging, timeout=90)
+        head = _git(workdir, "rev-parse", "origin/%s" % staging)
+        target = head.stdout.strip() if head and head.returncode == 0 else ""
+        where = "staging"
+    known = _git(workdir, "cat-file", "-e", "%s^{commit}" % target) if target else None
+    if not known or known.returncode:
+        return None, "không có commit %s của %s trong repo" % (target[:12], where)
+    for commit in commits:
+        res = _git(workdir, "merge-base", "--is-ancestor", commit, target)
+        if res and res.returncode == 0:
+            return None, "%s đã có commit %s của ticket" % (where, commit[:12])
+    return target, None
+
+
 def read_env_files(paths):
     """KEY=VALUE lines (`export` and quotes allowed). Values go to maestro as `-e`, never to stdout."""
     env = {}
@@ -396,6 +448,14 @@ def cmd_run(a):
     surface = (cfg.get("surfaces") or {}).get(name) or {}
     if a.install and not surface.get("install"):
         return emit({"error": "surfaces.%s.install trống — build + cài tay rồi chạy không --install, journal slow đề xuất key" % name}, 3)
+    against = None
+    if a.baseline:
+        if a.install or a.repeat != 1:
+            return emit({"error": "--baseline chạy bản chưa có thay đổi: bỏ --install, --repeat"}, 3)
+        against, why = baseline(cfg, name, workdir, surface, device_lock(cfg, name, a.device))
+        if not against:
+            return emit({"baseline": "skipped", "why": why})
+        name += "-baseline"
     folder = run_dir(a.issue, name)
     base = os.path.dirname(folder)
     # A new run of the same name replaces the old one. --reset also drops the issue's other runs: results of an earlier
@@ -423,7 +483,10 @@ def cmd_run(a):
                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     state["pid"] = proc.pid
     save_state(folder, state)
-    return emit({"run": name, "flows": len(a.flows), "total": state["total"], "out": folder})
+    res = {"run": name, "flows": len(a.flows), "total": state["total"], "out": folder}
+    if against:
+        res.update(baseline=against, expect="mọi flow fail ở bước assert thay đổi; flow pass = không kiểm thay đổi")
+    return emit(res)
 
 
 def failing_step(log_path, xml_path):
@@ -559,6 +622,8 @@ def main(argv=None):
     s.add_argument("--reset", action="store_true", help="lần run đầu của lượt: bỏ mọi lượt chạy trước của issue")
     s.add_argument("--install", action="store_true", help="build + cài surfaces.<name>.install trước, khi thiết bị chưa có đúng bản này")
     s.add_argument("--repeat", type=int, default=1, help="số lần chạy mỗi flow")
+    s.add_argument("--baseline", action="store_true", help="đỏ trước: chạy flow mới trên bản chưa có thay đổi (staging, "
+                   "hoặc bản đang cài trên thiết bị); tự bỏ qua khi bản đó đã có commit của ticket")
     s.add_argument("--device", help="udid khi có nhiều thiết bị")
     s.add_argument("--maestro", help="cờ thêm cho `maestro test`, vd --maestro=\"--headless --screen-size 1280x860\"")
     s.add_argument("--env-file", action="append", help="file KEY=VALUE (secret folder của staging.notes) → -e cho maestro")

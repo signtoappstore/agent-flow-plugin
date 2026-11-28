@@ -21,6 +21,7 @@
 
 ## Test tự động (trên staging)
 
+Đỏ trước @ <!-- sha bản chưa có thay đổi: flow mới ✗ ở bước nào, hoặc "bỏ qua — lý do" -->
 Staging @ <!-- deploy sha --> · <!-- k/k TC pass, flow mới pass 3/3 -->
 
 | Flow | TC | Kết quả |

@@ -1,9 +1,9 @@
 ---
 name: status
-description: Tổng quan AgentFlow của repo này — số ticket theo stage, việc đang chờ người (merge, QC tay, cần thông tin, bị chặn), bất thường (issue đã đóng mà chưa Done, ticket agent bị người khác giữ, cột ngoài mapping). --metrics thêm flow metrics (cycle time, first-pass yield, số lần review/QC fail) và thống kê journal. Chỉ đọc.
+description: Tổng quan AgentFlow của repo này — số ticket theo stage, việc đang chờ người (merge, QC tay, cần thông tin, bị chặn), bất thường (issue đã đóng mà chưa Done, ticket agent bị người khác giữ, cột ngoài mapping). --metrics thêm flow metrics (cycle time, first-pass yield, số lần review/QC fail), token + thời gian agent mỗi ticket/bước (transcript trên máy) và thống kê journal. Chỉ đọc.
 argument-hint: "[--metrics] [--days N]"
 disable-model-invocation: true
-allowed-tools: Bash(agentflow-board inspect*) Bash(agentflow-board items*) Bash(agentflow-board metrics*) Bash(agentflow-journal stats*)
+allowed-tools: Bash(agentflow-board inspect*) Bash(agentflow-board items*) Bash(agentflow-board metrics*) Bash(agentflow-journal stats*) Bash(agentflow-metrics*)
 ---
 
 **Chỉ đọc — không ghi gì lên GitHub.** Dùng `agentflow-board` (một lệnh trả kết quả đã gom, rẻ token hơn nhiều so với đọc từng issue qua MCP).
@@ -37,7 +37,7 @@ Chờ người: needs-info #… · blocked #… · qc-manual #…
 - Option Status ngoài mapping có card (inspect `open_by_status` có tên không thuộc `board.status`) → card vô hình với agent.
 - Status trống `(trống)` → card chưa vào luồng.
 - Ticket **không** mang `labels.agent` nhưng đang ở `in_progress`…`in_qc` → người làm tay hoặc thiếu label, agent sẽ bỏ qua; muốn agent tiếp quản: `/agentflow:do #n`.
-- Ticket mang `labels.agent` ở `in_progress` không có rework label → DEV run trước có thể đã chết giữa chừng (kể cả lúc chờ pipeline staging); `/agentflow:do #n` sẽ resume.
+- Ticket mang `labels.agent` ở `in_progress` không có rework label → DEV run trước có thể đã chết giữa chừng; `/agentflow:do #n` sẽ resume.
 - Ticket mang `labels.agent` ở `in_qc` không có `labels.qc_manual` → ticket của luồng cũ; `/agentflow:run` đưa về DEV (*requeue*).
 - `.claude/worktrees/af-<n>` của issue đã đóng → `/agentflow:run` sẽ dọn, hoặc `git worktree remove`.
 
@@ -48,7 +48,8 @@ Sạch → `✓ không có bất thường`.
 ```bash
 agentflow-board metrics "<board.url>" --days <N|30> --stages "ready_to_merge=<board.status.ready_to_merge>" \
   --parked "<labels.blocked>,<labels.needs_info>,<labels.qc_manual>"
+agentflow-metrics --days <N|30>
 agentflow-journal stats
 ```
 
-In nguyên output, thêm tối đa 3 dòng **nhận định**: first-pass yield thấp → agent nào hay bị trả về và vì sao (đọc 1–2 verdict ❌ gần nhất nếu cần); journal có ≥ 3 entry cùng loại → gợi `/agentflow:learn`.
+In nguyên output, thêm tối đa 3 dòng **nhận định**: first-pass yield thấp → agent nào hay bị trả về và vì sao (đọc 1–2 verdict ❌ gần nhất nếu cần); bước chiếm phần lớn token-eq → nêu nó; journal có ≥ 3 entry cùng loại → gợi `/agentflow:learn`.

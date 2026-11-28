@@ -1157,6 +1157,61 @@ class Feedback(BoardCase):
         self.assertIn("#42", res["error"])
 
 
+class Precheck(BoardCase):
+    """Deterministic gate before DEV hands a PR to SA: what the journal shows SA rejecting for (PR body, missing TC)."""
+
+    DESIGN = ("[AF:SA] design @abc\n| TC | AC | bước → kỳ vọng | mức |\n|---|---|---|---|\n"
+              "| TC1 | AC1 | mở → thấy | e2e |\n| TC2 | AC2 | gọi → 201 | api |\n| TC3 | AC3 | rung máy | tay |")
+    BODY = ("Closes #42\n## Thay đổi\n…\n## Lệch thiết kế\n—\n- [ ] AC1\n| AC1 | a.ts | TC1 | af-42-tc1.yaml |\n"
+            "## Test tự động\nTC1 ✓, TC2 ✓\nĐỏ trước @abc: af-42-tc1 ✗\n## Kiểm chứng lại\nQC tay: —")
+
+    def setup(self, body=BODY, draft=True, base="master", mergeable_state="clean", state_block="", comments=None, template=None):
+        self.gh.on("GET", "/issues/42/comments", comments if comments is not None else [
+            {"author_association": "OWNER", "body": self.DESIGN},
+            {"author_association": "NONE", "body": "[AF:SA] design @x\n| TC9 | AC1 | x | e2e |"}])
+        self.gh.on("GET", "/issues/42", {"body": "Spec" + state_block})
+        self.gh.on("GET", "/pulls/57", {"state": "open", "draft": draft, "base": {"ref": base}, "body": body, "mergeable": True,
+                                        "mergeable_state": mergeable_state, "head": {"sha": SHA}})
+        if template:
+            self.gh.on("GET", "pull_request_template.md", {"content": base64.b64encode(template.encode()).decode()})
+
+    def check(self, cfg=None):
+        return board.precheck("o/r", 42, 57, cfg or {})["problems"]
+
+    def test_clean_pr_passes(self):
+        self.setup()
+        self.assertEqual(self.check(), [])
+
+    def test_untrusted_design_and_tay_cases_are_not_required(self):
+        self.setup(body=self.BODY.replace("TC1 ✓, TC2 ✓", "TC2 ✓"))
+        self.assertEqual(self.check(), [])  # TC1 still named in the AC table; TC3 is tay, TC9 is from a stranger
+
+    def test_reports_each_gap(self):
+        self.setup(body="Fixes #42\nTC1", draft=False, base="develop", mergeable_state="dirty")
+        problems = " | ".join(self.check())
+        for part in ("draft", "base của PR", "conflict", "`Closes #42`", "checklist AC", "\"Kiểm chứng lại\"", "TC2", "Đỏ trước"):
+            self.assertIn(part, problems)
+
+    def test_group_needs_every_sub_and_custom_link(self):
+        self.setup(body=self.BODY.replace("Closes", "Resolves"), state_block="\n<!-- agentflow:state\ngroup: 43, 44\n-->")
+        self.assertEqual(self.check({"git": {"link": "Resolves"}}), ["body thiếu `Resolves #43`", "body thiếu `Resolves #44`"])
+
+    def test_repo_template_headings(self):
+        self.setup(template="## Thay đổi\n## Ảnh chụp\n")
+        self.assertEqual(self.check(), ['body thiếu mục "Ảnh chụp"'])
+
+    def test_without_design(self):
+        self.setup(comments=[])
+        self.assertIn("issue chưa có `[AF:SA] design`", self.check())
+
+    def test_cli_exit_code(self):
+        self.setup(body="Closes #42")
+        with mock.patch.object(afconfig, "load_config", return_value={}):
+            code, out = self.run_cmd("precheck", "o/r", "--issue", "42", "--pr", "57")
+        res = json.loads(out.splitlines()[-1])
+        self.assertEqual((code, res["ok"], res["head"]), (1, False, SHA))
+
+
 class Misc(BoardCase):
     def test_labels_create_or_update(self):
         self.gh.on("PATCH", "/labels/blocked", {}).on("POST", "/repos/o/r/labels", {})

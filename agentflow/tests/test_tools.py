@@ -563,6 +563,44 @@ class E2E(RepoCase):
         for n in ("44", "45"):  # detached runners must end before the temp dir goes
             self.assertEqual(self.wait(env, "--issue", n, "--max", "30")[0], 0)
 
+    def rev(self):
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout.strip()
+
+    def baseline(self, surface, *flows):
+        env = self.maestro_env()
+        res = tool("agentflow-e2e", "run", "--baseline", "--issue", "42", "--dir", os.path.join(self.repo, surface), "--name", surface,
+                   *flows, cwd=self.repo, env=env)
+        out = json.loads(res.stdout)
+        if out.get("run"):  # detached runner must end before the temp dir goes
+            self.wait(env, "--issue", "42", "--max", "30")
+        return res.returncode, out
+
+    def test_baseline_runs_on_a_build_without_the_change(self):
+        self.write("agentflow.yaml", E2E_CONFIG + "staging:\n  branch: staging\n")
+        self.git("commit", "-q", "-am", "staging key")
+        base = self.rev()
+        self.git("update-ref", "refs/remotes/origin/master", base)
+        self.git("update-ref", "refs/remotes/origin/staging", base)
+        self.change("web/.maestro/af-42-tc1-new.yaml", "url: x\ntags: [af-42]\n---\n- tapOn:\n    id: b\n")
+        self.assertEqual(self.baseline("web", ".maestro/af-42-tc1-new.yaml")[1]["baseline"], "skipped")  # flows only
+        self.change("web/src/settings.tsx", "export const A = 2\n")
+        code, out = self.baseline("web", ".maestro/af-42-tc1-new.yaml")
+        self.assertEqual((code, out["run"], out["baseline"]), (0, "web-baseline", base))
+        self.git("update-ref", "refs/remotes/origin/staging", self.rev())  # staging merged the ticket
+        code, out = self.baseline("web", ".maestro/af-42-tc1-new.yaml")
+        self.assertEqual(out["baseline"], "skipped")
+        self.assertIn("staging đã có commit", out["why"])
+        record = os.path.join(self.out.name, "af-device-default.installed")
+        self.assertIn("chưa có bản cài", self.baseline("mobile", ".maestro/settings.yaml")[1]["why"])
+        with open(record, "w") as fh:
+            fh.write("mobile %s" % base)
+        self.assertEqual(self.baseline("mobile", ".maestro/settings.yaml")[1]["baseline"], base)
+        with open(record, "w") as fh:
+            fh.write("mobile %s" % self.rev())
+        self.assertIn("bản đang cài đã có commit", self.baseline("mobile", ".maestro/settings.yaml")[1]["why"])
+        res, _ = self.run_flows(".maestro/af-42-tc1-new.yaml", extra=("--baseline", "--install"))
+        self.assertEqual(res.returncode, 3)
+
     def test_install_only_when_the_device_holds_another_build(self):
         count = os.path.join(self.out.name, "installs")
         self.write("agentflow.yaml", E2E_CONFIG.replace('install: "flutter build apk"', 'install: "echo x >> %s"' % count))
@@ -820,6 +858,198 @@ class Audit(RepoCase):
         self.assertIn("thiếu dòng đầu", out["errors"][0]["error"])
 
 
+UX_FINDINGS = """# audit ux · o/r @abc1234 · 2026-11-24
+
+## F1. Góc nhìn thiết kế cho lỗi thanh toán mất mạng
+- extends: qa:F1
+- evidence: audit-checkout-offline.png — banner lỗi đỏ chữ 11px, tương phản 2.8:1
+- platform: web
+- role: member
+
+### Góc nhìn UI/UX
+Banner lỗi dùng màu và cỡ chữ lệch token `danger`.
+
+## F2. Thống nhất bo góc nút theo token radius
+- fp: ux/buttons/radius-mismatch
+- type: Improvement
+- sev: thấp
+- effort: S
+- evidence: audit-home-default.png, audit-pay-default.png — 4px và 12px
+
+### Tiêu chí nghiệm thu
+- [ ] Mọi nút chính dùng `radius.md`
+
+## F3. Trỏ vào mục không có
+- extends: qa:F9
+- evidence: x
+
+### Góc nhìn
+không có đích
+"""
+ARCH_VIEW = """# audit arch · o/r @abc1234 · 2026-11-24
+
+## F1. Nguyên nhân gốc lỗi thanh toán mất mạng
+- extends: qa:F2
+- sev: cao
+- evidence: web/src/features/pay/pay.ts:3 — catch rỗng
+
+### Nguyên nhân gốc (Engineering)
+`pay()` nuốt lỗi mạng.
+"""
+MAP_FILES = {
+    "agentflow.yaml": AUDIT_CONFIG.replace("forbidden:", "staging:\n  branch: staging\n  notes: \"Tài khoản ở secret/staging/, coach dùng E2E_COACH_EMAIL\"\nforbidden:"),
+    "web/package.json": '{"dependencies": {"next": "15.0.0"}}\n',
+    "web/src/app/(main)/page.tsx": "export default function P() { return null }\n",
+    "web/src/app/(main)/orders/[orderId]/page.tsx": "export default function P() { return null }\n",
+    "web/src/app/login/page.tsx": "export default function P() { return null }\n",
+    "web/src/app/api/health/route.ts": "export async function GET() { return Response.json({ ok: true }) }\n",
+    "web/src/features/admin/guard.ts": "export const canSee = (user) => user.role === 'admin' || isOwner(user)\n"
+                                        "export enum UserRole { Admin = 'admin', Member = 'member' }\n"
+                                        "export enum SlotRole { Warmup = 'warmup' }\n",
+    "backend/src/routes/orders.router.ts": "router.get('/orders', requireAuth, list)\nrouter.post('/orders/:id/refund', refund)\n",
+    "mobile/lib/routes.dart": "class R {\n  static const String home = '/';\n  static const String gym = '/gym/detail';\n}\n"
+                              "final r = GoRouter(routes: [GoRoute(path: R.home, builder: (c, s) => const Home()),\n"
+                              "  GoRoute(path: gym.substring(1), builder: (c, s) => const Gym())]);\n",
+    "web/.maestro/admin.yaml": "url: ${STAGING_URL}\ntags: [admin]\n---\n- inputText: ${E2E_ADMIN_EMAIL}\n- assertVisible:\n    id: x\n",
+}
+
+
+class AuditMap(RepoCase):
+    """agentflow-audit map/plan/ledger: the whole product, every role, and a coverage map that carries over runs."""
+
+    git = Style.git
+    write = Style.write
+
+    def setUp(self):
+        super().setUp()
+        for rel, text in MAP_FILES.items():
+            self.write(rel, text)
+        self.write("secret/staging/web.env", "E2E_ADMIN_EMAIL=a@x\nE2E_ADMIN_PASSWORD=hunter2\nE2E_MEMBER_EMAIL=m@x\nSTAGING_URL=x\n")
+        self.git("add", "-A", ":!secret")
+        self.git("commit", "-q", "-m", "base")
+        self.out = os.path.join(self.repo, "out")
+        os.makedirs(self.out)
+
+    def audit(self, *args, code=0):
+        res = tool("agentflow-audit", *args, cwd=self.repo)
+        self.assertEqual(res.returncode, code, res.stdout + res.stderr)
+        return res.stdout
+
+    def save(self, name, text):
+        path = os.path.join(self.out, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def test_map_lists_screens_endpoints_roles_and_accounts(self):
+        out = json.loads(self.audit("map", "web", "backend", "mobile"))
+        self.assertEqual(sorted(s["area"] for s in out["screens"] if s["at"].startswith("web/")), ["/", "/login", "/orders/:orderId"])
+        self.assertEqual(sorted(s["area"] for s in out["screens"] if s["at"].startswith("mobile/")), ["/", "/gym/detail"])
+        by_path = {(e["method"], e["path"]): e for e in out["endpoints"]}
+        self.assertTrue(by_path[("GET", "/orders")]["auth_hint"])
+        self.assertFalse(by_path[("POST", "/orders/:p/refund")]["auth_hint"])
+        self.assertIn(("GET", "/api/health"), by_path)
+        self.assertEqual(out["unguarded"][0]["path"], "/api/health")
+        roles = [r["role"] for r in out["roles"]]
+        self.assertEqual(roles[:2], ["admin", "member"])
+        self.assertIn("owner", roles)
+        self.assertIn("guest", roles)  # a login screen: someone not signed in
+        self.assertNotIn("warmup", roles)  # SlotRole names no actor
+        self.assertEqual(out["accounts"]["admin"], ["E2E_ADMIN_EMAIL", "E2E_ADMIN_PASSWORD"])
+        self.assertEqual(out["accounts"]["coach"], ["E2E_COACH_EMAIL"])  # named by the notes
+        self.assertEqual(out["env_files"], [os.path.join(self.repo, "secret/staging/web.env")])
+        self.assertIn("owner", out["missing_accounts"])
+        self.assertNotIn("hunter2", json.dumps(out))  # key names only
+        kinds = {a["area"]: a["kind"] for a in out["areas"]}
+        self.assertEqual(kinds["API orders"], "api")
+        self.assertEqual(kinds["web /orders/:orderId"], "ui")
+
+    def test_map_groups_screens_when_the_table_would_be_too_long(self):
+        out = json.loads(self.audit("map", "--max-areas", "4", "web"))
+        self.assertLessEqual(len(out["areas"]), 4)
+        self.assertIn("/orders", [a["area"] for a in out["areas"]])
+
+    def test_plan_puts_fix_checks_and_changed_areas_first(self):
+        amap = self.save("map.json", self.audit("map", "web", "backend", "mobile"))
+        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True).stdout.strip()
+        self.write("web/src/app/login/page.tsx", "export default function P() { return 1 }\n")
+        self.git("commit", "-q", "-am", "login changed")
+        prev = self.save("prev.md", "## Bản đồ phủ\n\n| Vùng | admin | member | Lần cuối |\n|---|---|---|---|\n"
+                         "| web / | ✓ | ✓ | @%s 2026-11-01 |\n| web /login | ✓ | ✓ | @%s 2026-11-10 |\n"
+                         "| web /orders/:orderId | ✓ | ✗ #12 | @%s 2026-11-10 |\n| API /health | ✓ | ✓ | @%s 2026-11-10 |\n" % ((base[:7],) * 4))
+        out = json.loads(self.audit("plan", "--map", amap, "--prev", prev, "--closed", "12,40", "--max", "4"))
+        whys = [(s["area"], s["why"].split(" ")[0]) for s in out["selected"]]
+        self.assertEqual(whys[:2], [("web /orders/:orderId", "verify"), ("web /login", "changed")])
+        self.assertEqual(whys[2][1], "new")
+        self.assertEqual(out["roles"], ["admin", "member"])
+        self.assertEqual(out["covered_before"], 4)
+        self.assertEqual(out["selected"][0]["cells"], {"admin": "✓", "member": "✗ #12"})
+        focus = json.loads(self.audit("plan", "--map", amap, "--focus", "orders", "--max", "0"))
+        self.assertEqual({s["area"] for s in focus["selected"]}, {"web /orders/:orderId", "API orders"})
+
+    def test_ledger_merges_runs_and_keeps_the_trend(self):
+        amap = self.save("map.json", self.audit("map", "web", "backend", "mobile"))
+        prev = self.save("prev.md", "## Sức khoẻ\n\n| Ngày | @sha | Vùng đã phủ | Role | Cao | Vừa | Thấp | Tái phát | Xác minh sửa |\n"
+                         "|---|---|---|---|---|---|---|---|---|\n| 2026-11-01 | @aaaaaaa | 1/9 (11%) | 1/2 | 2 | 1 | 0 | 0 | — |\n\n"
+                         "## Bản đồ phủ\n\n| Vùng | admin | member | Lần cuối |\n|---|---|---|---|\n| web / | ✓ | · | @aaaaaaa 2026-11-01 |\n"
+                         "| web /gone | ✓ | ✓ | @aaaaaaa 2026-11-01 |\n")
+        run = self.save("run.md", "## Bản đồ phủ\n\n| Vùng | admin | member | guest |\n|---|---|---|---|\n"
+                        "| web /orders/:orderId | ✓ | ✗ qa:F1 | ⛔ |\n\n## Xác minh sửa\n- #12 ✓\n- #13 ✗\n")
+        index = self.save("index.json", json.dumps({"by_sev": {"cao": 1, "vừa": 2}, "findings": [{"regressed": "#13"}]}))
+        md = self.audit("ledger", "--map", amap, "--prev", prev, "--run", run, "--index", index, "--sha", "b" * 40,
+                        "--tickets", "qa:F1=#45", "--date", "2026-11-27")
+        self.assertIn("| web /orders/:orderId | ✓ | ✗ #45 | ⛔ | @bbbbbbb 2026-11-27 |", md)
+        self.assertIn("| web / | ✓ | · | · | @aaaaaaa 2026-11-01 |", md)  # untouched this run: kept
+        self.assertNotIn("/gone", md)  # no longer in the product
+        self.assertIn("| 2026-11-01 | @aaaaaaa |", md)
+        self.assertRegex(md, r"\| 2026-11-27 \| @bbbbbbb \| 2/\d+ \(\d+%\) \| 3/3 \| 1 \| 2 \| 0 \| 1 \| 1/2 \|")
+        self.assertIn("Phủ vùng 1/", md)
+        self.assertLess(md.index("## Sức khoẻ"), md.index("## Bản đồ phủ"))
+        again = self.save("again.md", md)
+        out = json.loads(self.audit("plan", "--map", amap, "--prev", again, "--closed", "45"))
+        self.assertEqual(out["selected"][0]["why"], "verify #45")
+
+
+class AuditPanel(RepoCase):
+    """findings: the UI/UX, Product and Engineering experts add their view to a finding the tester found."""
+
+    git = Style.git
+    write = Style.write
+
+    def setUp(self):
+        super().setUp()
+        self.write("agentflow.yaml", AUDIT_CONFIG)
+        self.write("out/qa.md", QA_FINDINGS)
+        self.write("out/ux.md", UX_FINDINGS)
+        self.write("out/arch.md", ARCH_VIEW)
+
+    def audit(self, *args, code=0):
+        res = tool("agentflow-audit", *args, cwd=self.repo)
+        self.assertEqual(res.returncode, code, res.stdout + res.stderr)
+        return res.stdout
+
+    def test_views_join_the_finding_they_extend(self):
+        out = json.loads(self.audit("findings", "out/qa.md", "out/ux.md", "out/arch.md", code=1))
+        by_id = {f["id"]: f for f in out["findings"]}
+        self.assertEqual(by_id["qa:F1"]["panel"], ["qa", "ux"])
+        self.assertEqual(by_id["qa:F1"]["roles"], ["member"])
+        self.assertEqual(by_id["qa:F2"]["sev"], "cao")  # Engineering showed a lost payment error: raised
+        self.assertEqual(by_id["qa:F2"]["sev_from"], "thấp → cao (arch:F1)")
+        self.assertNotIn("ux:F1", by_id)
+        self.assertIn("ux:F2", by_id)
+        self.assertEqual(out["panel"], 2)
+        self.assertEqual(out["by_lens"], {"qa": 2, "ux": 1})
+        [error] = out["errors"]
+        self.assertEqual(error["id"], "ux:F3")
+        body = self.audit("findings", "out/qa.md", "out/ux.md", "out/arch.md", "--body", "qa:F1")
+        self.assertLess(body.index("### Tiêu chí nghiệm thu"), body.index("### Góc nhìn UI/UX"))
+
+    def test_a_view_cannot_extend_its_own_lens(self):
+        self.write("out/qa2.md", "# audit qa · o/r\n\n## F1. x\n- extends: qa:F2\n- evidence: y\n\n### Góc nhìn\nz\n")
+        out = json.loads(self.audit("findings", "out/qa2.md", code=1))
+        self.assertIn("lăng kính khác", out["errors"][0]["error"])
+
+
 class Base(unittest.TestCase):
     """agentflow-base: a ticket's worktree comes from origin, whatever the person does in the main checkout meanwhile."""
 
@@ -1018,6 +1248,51 @@ class Base(unittest.TestCase):
         self.assertEqual(self.base("clean", "--issue", "7", "--staging"), {"removed": [staging], "kept": [self.wt]})
         self.git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/feat/7-x")
         self.assertEqual(self.base("clean", "--issue", "7", "--issue", "8"), {"removed": [self.wt], "kept": []})
+
+
+class Metrics(unittest.TestCase):
+    """agentflow-metrics: cost per ticket and per step from the local transcripts of agentflow spawns only."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = os.path.realpath(self.tmp.name)
+        self.repo = os.path.join(self.home, "my.repo")
+        os.makedirs(self.repo)
+        self.folder = os.path.join(self.home, "claude", "projects", self.home.replace("/", "-").replace(".", "-") + "-my-repo", "s1", "subagents")
+        os.makedirs(self.folder)
+
+    def spawn(self, name, agent, prompt, usages, minutes=10):
+        with open(os.path.join(self.folder, name + ".meta.json"), "w") as fh:
+            json.dump({"agentType": agent}, fh)
+        lines = [{"type": "user", "timestamp": "2026-11-26T10:00:00Z", "message": {"content": prompt}}]
+        for u in usages:
+            lines.append({"type": "assistant", "timestamp": "2026-11-26T10:%02d:00Z" % minutes, "message": {"usage": u}})
+        with open(os.path.join(self.folder, name + ".jsonl"), "w") as fh:
+            fh.write("\n".join(json.dumps(l) for l in lines) + "\nnot json\n")
+
+    def metrics(self, *args):
+        res = tool("agentflow-metrics", "--project", self.repo, "--json", *args, cwd=self.repo, env={"CLAUDE_CONFIG_DIR": os.path.join(self.home, "claude")})
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return json.loads(res.stdout)
+
+    def test_per_ticket_and_step(self):
+        big = {"input_tokens": 0, "cache_read_input_tokens": 10_000_000, "cache_creation_input_tokens": 0, "output_tokens": 0}
+        self.spawn("a1", "agentflow:dev", "REPO: o/r\nISSUE: #42\nMODE: new", [big, dict(big, output_tokens=200_000)], minutes=30)
+        self.spawn("a2", "agentflow:sa", "REPO: o/r\nISSUE: #42\nMODE: review", [big])
+        self.spawn("a3", "agentflow:sa", [{"type": "text", "text": "ISSUE: #43\nMODE: review"}], [big])
+        self.spawn("a4", "general-purpose", "ISSUE: #42", [big])  # not an agentflow spawn
+        res = self.metrics()
+        self.assertEqual((res["tickets"], res["spawns"]), (2, 3))
+        top = res["top"][0]
+        self.assertEqual((top["issue"], top["eq"], top["sa_reviews"], top["minutes"]), (42, 4_000_000, 1, 40))
+        steps = {r["step"]: r for r in res["by_step"]}
+        self.assertEqual((steps["dev/new"]["turns_median"], steps["dev/new"]["peak_median"], steps["dev/new"]["share"]), (2, 10_000_000, 0.6))
+        self.assertEqual(self.metrics("--issue", "43")["tickets"], 1)
+
+    def test_nothing_yet(self):
+        res = tool("agentflow-metrics", "--project", self.repo, cwd=self.repo, env={"CLAUDE_CONFIG_DIR": os.path.join(self.home, "nope")})
+        self.assertIn("chưa có lượt agent", res.stdout)
 
 
 class ResultCheck(unittest.TestCase):

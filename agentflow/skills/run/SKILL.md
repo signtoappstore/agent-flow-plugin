@@ -1,6 +1,6 @@
 ---
 name: run
-description: Chạy AgentFlow loop trên board của repo này — nhặt mọi ticket agent xử lý được (sửa theo góp ý, QC người fail, review, rework, rồi việc mới ở Ready theo Priority), chain SA thiết kế → DEV (code + flow automation + deploy staging + chạy flow) → SA review song song qua worktree, dừng ở cổng của người hoặc khi chạm trần số ticket.
+description: Chạy AgentFlow loop trên board của repo này — nhặt mọi ticket agent xử lý được (sửa theo góp ý, QC người fail, review, rework, rồi việc mới ở Ready theo Priority), chain SA thiết kế → DEV (code + flow automation, đỏ trước) → SA review code → DEV (deploy staging + chạy flow) → SA chốt, song song qua worktree, dừng ở cổng của người hoặc khi chạm trần số ticket.
 argument-hint: "[--max N] [--parallel N] [--only sa|dev]"
 disable-model-invocation: true
 ---
@@ -23,7 +23,8 @@ boot (dispatch §1)
 danh sách = đọc hàng đợi (§2) → bảng hành động (§3) → sắp xếp (§4), bỏ ticket in-flight / đã xong trong lượt
 lặp tới khi danh sách rỗng và không còn agent chạy, hoặc chạm trần (§7):
   còn slot (< `parallel` ticket đang chạy) → ticket kế của danh sách, đọc lại Status của riêng nó, SYS transition nếu cần → spawn (§5)
-  có kết quả (§6): đi tiếp được ⇒ spawn bước kế ngay; dừng ⇒ slot trống, lấp ngay, không chờ agent khác xong
+  có kết quả (§6): đi tiếp được ⇒ spawn bước kế ngay; dừng hay `deploying` ⇒ slot trống, lấp ngay, không chờ agent khác xong
+  ticket chờ deploy xong ⇒ lấy slot kế trước ticket mới
   danh sách hết mà có slot trống ⇒ đọc lại hàng đợi một lần
 dọn worktree (§7) → báo cáo (§8)
 ```

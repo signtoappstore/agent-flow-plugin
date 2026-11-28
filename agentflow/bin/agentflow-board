@@ -45,6 +45,9 @@ Auth: the token `gh` uses ($GH_TOKEN, $GITHUB_TOKEN, else `gh auth token`). Neve
   group-sync <owner/repo> --issue N         the sub-issues of group N (state block `group`) take the Status of N
   feedback <owner/repo> --issue N [--issue M ...] [--summary]   people's feedback on the PR of each issue
        (state block `pr`, else the one open PR linked to it); one JSON line per issue
+  precheck <owner/repo> --issue N [--pr M]  before DEV hands a PR to review: draft, base, conflict, `<git.link> #n`, AC
+                                            checklist, sections of dev.md §6 + the repo's PR template, every e2e/api TC of
+                                            `[AF:SA] design` named, the "Đỏ trước" line; one JSON line, exit 1 on a problem
   doctor [--root DIR]                       check agentflow.yaml against GitHub
   preflight [--root DIR]                    before spawning: can this machine push to origin, which env is missing;
                                             one JSON line
@@ -74,8 +77,8 @@ STATUS_COLORS = {"backlog": "GRAY", "ready": "BLUE", "in_progress": "YELLOW", "i
 STATUS_DESC = {
     "backlog": "Ý tưởng, yêu cầu, bug mới. PO viết tiêu chí nghiệm thu, đặt Priority/Size rồi kéo sang Ready.",
     "ready": "Đủ tiêu chí nghiệm thu, có Priority + Size, chỉ PO kéo việc mới vào. SA agent thiết kế giải pháp + rủi ro + test case (nhãn agentflow), rồi DEV nhặt. Nhãn qc-failed = QC người trả về.",
-    "in_progress": "DEV code + viết flow automation, deploy lên staging, chạy flow liên quan (tự sửa tối đa 3 vòng), hoặc sửa theo review/QC (nhãn changes-requested / qc-failed).",
-    "in_review": "Flow automation đã pass trên staging — SA agent review theo thiết kế: độ đúng, đủ, kiến trúc, bảo mật, test. ✅: có mục QC tay thì sang In QC, không thì undraft.",
+    "in_progress": "DEV code + viết flow automation (flow mới phải đỏ trên bản chưa có thay đổi), mở draft PR, hoặc sửa theo review/QC (nhãn changes-requested / qc-failed).",
+    "in_review": "SA agent review code theo thiết kế (đúng, đủ, kiến trúc, bảo mật, test). ✅ code: DEV deploy staging + chạy flow liên quan (tự sửa tối đa 3 vòng), SA chốt: có mục QC tay thì sang In QC, không thì undraft.",
     "in_qc": "Nhãn qc-manual = chờ QC người test mục QC tay của PR trên staging. Pass: tick rồi kéo card sang Ready to Merge; fail: gắn qc-failed + comment.",
     "ready_to_merge": "Review + QC đã pass, PR đã undraft. Người approve + merge. Muốn sửa: Request changes trên PR.",
     "done": "PR đã merge, issue đã đóng.",
@@ -1170,6 +1173,97 @@ def cmd_group(a):
         print(json.dumps(_group_row(cfg, ref, number, node), ensure_ascii=False))
 
 
+PR_SECTIONS = ("Lệch thiết kế", "Test tự động", "Kiểm chứng lại", "QC tay")  # dev.md §6: always in the PR body
+TC_ROW = re.compile(r"^\s*\|.*?\bTC[-\s]?(\d+)\b(.*)$", re.M)
+AUTO_LEVEL = re.compile(r"\b(e2e|api)\b", re.I)
+
+
+def _rest_pages(path):
+    """Every page of a REST list (per_page=100)."""
+    out, page = [], 1
+    while True:
+        chunk = http("GET", "%s%sper_page=100&page=%d" % (path, "&" if "?" in path else "?", page)) or []
+        out.extend(chunk)
+        if len(chunk) < 100:
+            return out
+        page += 1
+
+
+def _design_tcs(comments):
+    """TC numbers of level e2e/api in the latest trusted `[AF:SA] design` comment (its test case table)."""
+    designs = [c for c in comments if (c.get("author_association") in TRUSTED
+                                       and (c.get("body") or "").lstrip().startswith("[AF:SA] design"))]
+    if not designs:
+        return None
+    return sorted({int(n) for n, rest in TC_ROW.findall(designs[-1]["body"]) if AUTO_LEVEL.search(rest)})
+
+
+def _template_headings(slug, base):
+    try:
+        res = http("GET", "/repos/%s/contents/.github/pull_request_template.md?ref=%s" % (slug, urllib.parse.quote(base)))
+    except RuntimeError:
+        return []  # no template in this repo
+    text = base64.b64decode(res.get("content") or "").decode("utf-8", "replace")
+    return [m.strip() for m in re.findall(r"^#{1,6}\s+(.+?)\s*#*$", text, re.M)]
+
+
+def precheck(slug, number, pr_number, cfg):
+    """What would send the PR back before any review: the PR body against dev.md §6 and the design, conflicts."""
+    issue = http("GET", "/repos/%s/issues/%d" % (slug, number))
+    state = _state_block(issue.get("body"))
+    pr_number = pr_number or (int(state["pr"].lstrip("#")) if state.get("pr", "").lstrip("#").isdigit() else None)
+    res = {"issue": number, "pr": pr_number, "problems": []}
+    if not pr_number:
+        res["problems"].append("chưa có PR: truyền --pr <m>")
+        return res
+    pr = http("GET", "/repos/%s/pulls/%d" % (slug, pr_number))
+    if pr.get("mergeable") is None and pr.get("state") == "open":  # GitHub computes it on the first read
+        time.sleep(3)
+        pr = http("GET", "/repos/%s/pulls/%d" % (slug, pr_number))
+    res["head"] = (pr.get("head") or {}).get("sha")
+    body, problems = pr.get("body") or "", res["problems"]
+    base = afconfig.base_branch(cfg)
+    link = str((cfg.get("git") or {}).get("link") or "Closes")
+    if pr.get("state") != "open":
+        problems.append("PR #%d không mở" % pr_number)
+    if not pr.get("draft"):
+        problems.append("PR phải là draft")
+    if (pr.get("base") or {}).get("ref") != base:
+        problems.append("base của PR phải là %s" % base)
+    if pr.get("mergeable_state") == "dirty":
+        problems.append("conflict với %s: git merge origin/%s (không rebase commit đã push)" % (base, base))
+    for n in [number] + _numbers(state.get("group")):
+        if not re.search(r"\b%s\s+#%d\b" % (re.escape(link), n), body, re.I):
+            problems.append("body thiếu `%s #%d`" % (link, n))
+    if not re.search(r"^\s*[-*] \[[ xX]\] ", body, re.M):
+        problems.append("body thiếu checklist AC (`- [ ]`)")
+    missing = [s for s in PR_SECTIONS + tuple(_template_headings(slug, base)) if s.lower() not in body.lower()]
+    problems.extend("body thiếu mục \"%s\"" % s for s in dict.fromkeys(missing))
+    tcs = _design_tcs(_rest_pages("/repos/%s/issues/%d/comments" % (slug, number)))
+    if tcs is None:
+        problems.append("issue chưa có `[AF:SA] design`")
+        return res
+    named = {int(n) for n in re.findall(r"\bTC[-\s]?(\d+)\b", body)}
+    absent = [t for t in tcs if t not in named]
+    if absent:
+        problems.append("bảng AC / Test tự động thiếu TC %s của thiết kế" % ", ".join("TC%d" % t for t in absent))
+    if tcs and "đỏ trước" not in body.lower():
+        problems.append("Test tự động thiếu dòng \"Đỏ trước\" (flow mới fail trên bản chưa có thay đổi, hoặc bỏ qua — lý do)")
+    return res
+
+
+def cmd_precheck(a):
+    cfg = afconfig.load_config(afconfig.repo_root() or ".") or {}
+    try:
+        res = precheck(a.slug, a.issue, a.pr, cfg)
+    except RuntimeError as err:
+        print(json.dumps({"issue": a.issue, "error": str(err)[:300]}, ensure_ascii=False))
+        sys.exit(2)
+    res["ok"] = not res["problems"]
+    print(json.dumps(res, ensure_ascii=False))
+    sys.exit(0 if res["ok"] else 1)
+
+
 def cmd_group_sync(a):
     """Sub-issues of a group follow the Status of their parent, so the board shows where each one is."""
     cfg, ref = _group_cfg()
@@ -1593,6 +1687,8 @@ def main():
     s = sub.add_parser("group-sync"); s.add_argument("slug"); s.add_argument("--issue", type=int, required=True)
     s = sub.add_parser("feedback"); s.add_argument("slug"); s.add_argument("--issue", type=int, action="append", required=True)
     s.add_argument("--summary", action="store_true", help="một dòng mỗi issue: pr + số mục chờ DEV")
+    s = sub.add_parser("precheck"); s.add_argument("slug"); s.add_argument("--issue", type=int, required=True)
+    s.add_argument("--pr", type=int, help="PR của ticket (mặc định state block `pr`)")
     s = sub.add_parser("doctor"); s.add_argument("--root")
     s = sub.add_parser("preflight"); s.add_argument("--root")
     a = p.parse_args()
@@ -1600,7 +1696,7 @@ def main():
                "status-apply": cmd_status_apply, "ensure-field": cmd_ensure_field, "create": cmd_create,
                "platform-migrate": cmd_platform_migrate, "workflows": cmd_workflows, "dispatch": cmd_dispatch, "rerun": cmd_rerun, "cancel": cmd_cancel,
                "labels": cmd_labels, "repo": cmd_repo, "milestones": cmd_milestones, "issue-types": cmd_issue_types, "metrics": cmd_metrics, "checks": cmd_checks,
-               "feedback": cmd_feedback, "group": cmd_group, "group-sync": cmd_group_sync, "doctor": cmd_doctor, "preflight": cmd_preflight}[a.cmd]
+               "feedback": cmd_feedback, "precheck": cmd_precheck, "group": cmd_group, "group-sync": cmd_group_sync, "doctor": cmd_doctor, "preflight": cmd_preflight}[a.cmd]
     try:
         handler(a)
     except RuntimeError as err:

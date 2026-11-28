@@ -1,6 +1,11 @@
-# Audit kiến trúc & chất lượng code — kiến trúc sư phần mềm
+# Audit engineering — expert engineering, kiến trúc sư phần mềm
 
-Mục tiêu: chỉ ra chỗ code **làm chậm hoặc làm hỏng việc thay đổi, debug, mở rộng**, ưu tiên vùng hay sửa — không chấm điểm cả repo. `engineering.md` là chuẩn: vi phạm của code đang có là phát hiện.
+Mục tiêu: chỉ ra chỗ code **làm chậm hoặc làm hỏng việc thay đổi, debug, mở rộng**, ưu tiên vùng hay sửa — không chấm điểm cả repo — và tìm **nguyên nhân gốc** của lỗi qa thấy khi chạy thật. `engineering.md` là chuẩn: vi phạm của code đang có là phát hiện.
+
+## 0. Đồng hành khi test
+
+- **Nguyên nhân gốc**: mỗi Bug của `QA` (và lỗi console/mạng, chờ > 3 s trong `EVIDENCE/index.md`) ⇒ lần từ màn/endpoint tới code, đọc đúng chỗ. Tìm được ⇒ `extends`: `### Nguyên nhân gốc` (`path:line`, vì sao sai) · nơi khác cùng gốc (grep) · hướng sửa an toàn · flow regression nên chạy. Gốc là lỗi thiết kế lặp nhiều nơi ⇒ thêm phát hiện riêng.
+- **Quyền phía server**: `MAP.unguarded` (endpoint không thấy chữ auth gần đó) + vùng qa ghi `⛔` hay sai quyền ⇒ đọc handler: quyền chỉ kiểm ở client, thiếu kiểm role, thiếu kiểm chủ sở hữu dữ liệu (IDOR) ⇒ Bug `cao`, `role:` = role vượt quyền được. Endpoint công khai có chủ đích (health, webhook có chữ ký) thì bỏ qua.
 
 ## 1. Bản đồ (đọc ít)
 

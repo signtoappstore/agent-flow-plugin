@@ -1,0 +1,474 @@
+#!/usr/bin/env python3
+"""Release AgentFlow from its source tree and install it in every project that uses it (stdlib only). /agentflow:distribute
+drives it; each subcommand also runs on its own, from any directory.
+
+  agentflow-distribute source                        print the source root (marketplace dir) or exit 2 when this machine has none
+  agentflow-distribute plan [--json]                 read-only: release state, every install, offline compat of each project
+  agentflow-distribute bump patch|minor|major        bump "version" in plugin.json
+  agentflow-distribute verify                        claude plugin validate + the unit tests
+  agentflow-distribute publish [--timeout S]         tag agentflow--v<version> on a clean HEAD, push branch + tag atomically
+  agentflow-distribute install [--project DIR ...]   marketplace update, then plugin update in each project, version checked
+  agentflow-distribute compat [--project DIR ...] [--json] [--warns]
+                                                     can each project run the source version as it is? exit 1 when one cannot
+
+Source: $AGENTFLOW_SOURCE, else this file's own tree when it is a git clone, else the directory marketplace that
+installed agentflow (~/.claude/plugins/known_marketplaces.json). A copy run from the plugin cache re-executes the source
+copy, so the logic is always the version being released, never the older one a project has installed.
+
+Compat is judged by the source's own code (afconfig.SCHEMA, validate_config, AGENT_ALLOW), so a breaking change that the
+new plugin enforces is found without a hand-kept list. Nothing here touches GitHub except `publish` (git push).
+
+Env: CLAUDE_CONFIG_DIR (default ~/.claude) holds plugins/installed_plugins.json; AGENTFLOW_CLAUDE_BIN overrides `claude`.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+
+ROOT = None  # marketplace root of the source clone, set by resolve_source()
+PLUGIN = "agentflow"
+SELF = os.path.realpath(os.path.abspath(__file__))
+VERSION = re.compile(r'("version"\s*:\s*")(\d+)\.(\d+)\.(\d+)(")')
+SCHEMA_LINE = re.compile(r"^SCHEMA\s*=\s*(\d+)", re.M)
+# Source files whose changes can make a project's config or comments unreadable by the new version.
+CONTRACT_FILES = ("agentflow/agentflow.yaml", "agentflow/scripts/afconfig.py", "agentflow/references/protocol.md")
+OWNED = ("agentflow.yaml",)  # files of a project that the compat migration may edit
+NO_SOURCE = ("máy này không giữ source của agentflow (marketplace không phải dạng directory trỏ vào một bản clone git) — "
+             "chỉ máy giữ source phát hành được; bản cài từ GitHub thì cập nhật bằng claude plugin update")
+
+
+def run(cmd, cwd=None, timeout=120, env=None):
+    try:
+        res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout sau %ds" % timeout
+    except OSError as err:
+        return 127, "", str(err)
+    return res.returncode, res.stdout, res.stderr
+
+
+def git(args, cwd=None, timeout=30):
+    code, out, _ = run(["git", *args], cwd=cwd or ROOT, timeout=timeout)
+    return out.strip() if code == 0 else None
+
+
+def claude_bin():
+    return os.environ.get("AGENTFLOW_CLAUDE_BIN") or "claude"
+
+
+def config_dir():
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+
+
+def is_source(root):
+    has_market = os.path.isfile(os.path.join(root, ".claude-plugin", "marketplace.json"))
+    return has_market and os.path.exists(os.path.join(root, ".git"))
+
+
+def resolve_source():
+    """Marketplace root of the clone this plugin is released from, or None."""
+    env = os.environ.get("AGENTFLOW_SOURCE")
+    if env:
+        return os.path.realpath(env) if is_source(os.path.realpath(env)) else None
+    here = os.path.realpath(os.path.join(os.path.dirname(SELF), "..", ".."))
+    if is_source(here):
+        return here
+    installed = (read_json(os.path.join(config_dir(), "plugins", "installed_plugins.json"), {}) or {}).get("plugins") or {}
+    known = read_json(os.path.join(config_dir(), "plugins", "known_marketplaces.json"), {}) or {}
+    for key in installed:
+        if not key.startswith(PLUGIN + "@"):
+            continue
+        src = (known.get(key.split("@", 1)[1]) or {}).get("source") or {}
+        path = os.path.realpath(os.path.expanduser(src.get("path") or ""))
+        if src.get("source") == "directory" and is_source(path):
+            return path
+    return None
+
+
+def exec_source_copy():
+    """Run from the plugin cache (an older version): hand over to the copy in the source tree."""
+    target = os.path.join(plugin_dir(), "bin", "agentflow-distribute")
+    if os.path.realpath(target) == SELF or not os.path.isfile(target):
+        return
+    env = dict(os.environ, AGENTFLOW_SOURCE=ROOT)
+    os.execve(sys.executable, [sys.executable, "-I", target, *sys.argv[1:]], env)
+
+
+def read_json(path, default=None):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+# ── source ──────────────────────────────────────────────────────────────────
+
+
+def marketplace():
+    meta = read_json(os.path.join(ROOT, ".claude-plugin", "marketplace.json")) or {}
+    entry = next((p for p in meta.get("plugins") or [] if p.get("name") == PLUGIN), None)
+    if not meta.get("name") or not entry:
+        sys.exit("✗ %s/.claude-plugin/marketplace.json không khai plugin %s" % (ROOT, PLUGIN))
+    return meta["name"], os.path.normpath(os.path.join(ROOT, str(entry.get("source") or PLUGIN)))
+
+
+def plugin_dir():
+    return marketplace()[1]
+
+
+def plugin_id():
+    return "%s@%s" % (PLUGIN, marketplace()[0])
+
+
+def manifest_path():
+    return os.path.join(plugin_dir(), ".claude-plugin", "plugin.json")
+
+
+def source_version():
+    return (read_json(manifest_path()) or {}).get("version")
+
+
+def afconfig():
+    scripts = os.path.join(plugin_dir(), "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    sys.dont_write_bytecode = True  # no __pycache__ in the tree being released, no stale .pyc after an edit
+    import afconfig as mod  # noqa: E402  (the source copy: compat must be judged by the version being released)
+    return mod
+
+
+def vtuple(version):
+    try:
+        return tuple(int(x) for x in str(version).split("."))
+    except ValueError:
+        return (0,)
+
+
+def tag_of(version):
+    return "%s--v%s" % (PLUGIN, version)
+
+
+def last_tag():
+    tags = (git(["tag", "--list", tag_of("*")]) or "").split()
+    return max(tags, key=lambda t: vtuple(t[len(tag_of("")):]), default=None)
+
+
+def schema_at(ref):
+    text = git(["show", "%s:%s" % (ref, os.path.relpath(os.path.join(plugin_dir(), "scripts", "afconfig.py"), ROOT))])
+    match = SCHEMA_LINE.search(text or "")
+    return int(match.group(1)) if match else None
+
+
+def default_branch():
+    head = git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    return head.split("/", 1)[1] if head and "/" in head else "master"
+
+
+def release_state():
+    version = source_version()
+    tag = tag_of(version)
+    head = git(["rev-parse", "HEAD"])
+    tag_commit = git(["rev-parse", "-q", "--verify", "refs/tags/%s^{commit}" % tag])
+    dirty = [line[3:] for line in (git(["status", "--porcelain"]) or "").splitlines() if line.strip()]
+    branch = git(["rev-parse", "--abbrev-ref", "HEAD"])
+    base = default_branch()
+    unpushed = git(["rev-list", "--count", "origin/%s..HEAD" % base])
+    prev = last_tag()
+    schema_now = afconfig().SCHEMA
+    schema_prev = schema_at(prev) if prev else None
+    if tag_commit and (dirty or tag_commit != head):
+        state = "needs_bump"  # this version is already tagged on another tree: install would not refresh the cache
+    elif tag_commit:
+        state = "released"
+    else:
+        state = "unreleased"
+    prev_version = prev[len(tag_of("")):] if prev else None
+    if prev_version and vtuple(version) < vtuple(prev_version):
+        state = "needs_bump"
+    return {
+        "root": ROOT, "plugin_dir": plugin_dir(), "id": plugin_id(), "version": version, "tag": tag, "state": state,
+        "last_tag": prev, "head": head, "branch": branch, "base": base, "on_base": branch == base,
+        "dirty": dirty, "unpushed": int(unpushed) if unpushed and unpushed.isdigit() else None,
+        "schema": schema_now, "schema_last_tag": schema_prev,
+        "min_bump": "minor" if schema_prev is not None and schema_prev != schema_now else "patch",
+        "marketplace_source": marketplace_source(),
+    }
+
+
+def marketplace_source():
+    """directory → Claude Code copies this working tree at install; github → it installs what was pushed."""
+    known = read_json(os.path.join(config_dir(), "plugins", "known_marketplaces.json"), {}) or {}
+    src = (known.get(marketplace()[0]) or {}).get("source") or {}
+    if src.get("source") == "directory":
+        return "directory" if os.path.realpath(src.get("path") or "") == ROOT else "directory:%s" % src.get("path")
+    return src.get("source") or "missing"
+
+
+# ── installs ────────────────────────────────────────────────────────────────
+
+
+def installs():
+    data = read_json(os.path.join(config_dir(), "plugins", "installed_plugins.json"), {}) or {}
+    out = []
+    for entry in (data.get("plugins") or {}).get(plugin_id()) or []:
+        path = entry.get("projectPath")
+        out.append({"scope": entry.get("scope") or "user", "project": os.path.realpath(path) if path else None,
+                    "version": entry.get("version"), "sha": entry.get("gitCommitSha")})
+    return out
+
+
+def select(items, projects):
+    if not projects:
+        return items
+    want = {os.path.realpath(os.path.expanduser(p)) for p in projects}
+    picked = [i for i in items if i["project"] in want]
+    unknown = want - {i["project"] for i in picked}
+    if unknown:
+        sys.exit("✗ không có bản cài %s ở: %s" % (plugin_id(), ", ".join(sorted(unknown))))
+    return picked
+
+
+def enabled(project):
+    """enabledPlugins of the project's local then shared settings; None when neither says."""
+    for name in ("settings.local.json", "settings.json"):
+        value = ((read_json(os.path.join(project, ".claude", name), {}) or {}).get("enabledPlugins") or {}).get(plugin_id())
+        if value is not None:
+            return bool(value)
+    return None
+
+
+def contract_commits(sha):
+    """Commits since the installed snapshot that touched what a project's config must agree with."""
+    if not sha or git(["cat-file", "-e", sha + "^{commit}"]) is None:
+        return None
+    out = git(["log", "--format=%h %s", "%s..HEAD" % sha, "--", *CONTRACT_FILES]) or ""
+    return [line for line in out.splitlines() if line]
+
+
+def compat(item):
+    af = afconfig()
+    project = item["project"]
+    report = dict(item, plugin_schema=af.SCHEMA, fails=[], warns=[], missing_allow=[], config_dirty=False,
+                  enabled=None, branch=None, contract_commits=None, up_to_date=item["version"] == source_version())
+    if project is None:  # user scope: no project config to judge
+        report["status"] = "ok"
+        return report
+    if not os.path.isdir(project):
+        report["status"] = "missing"
+        report["fails"].append("thư mục project không còn")
+        return report
+    report["enabled"] = enabled(project)
+    report["branch"] = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=project)
+    report["contract_commits"] = contract_commits(item["sha"])
+    try:
+        cfg = af.load_config(project)
+    except ValueError as err:
+        report["status"] = "incompatible"
+        report["fails"].append("agentflow.yaml không parse được: %s" % err)
+        return report
+    if cfg is None:
+        report["status"] = "not_initialized"
+        return report
+    status = git(["status", "--porcelain", "--", *OWNED], cwd=project)
+    report["config_dirty"] = bool(status)
+    report["schema"] = cfg.get("schema")
+    if cfg.get("schema") != af.SCHEMA:
+        report["fails"].append("schema %s, plugin đọc %d" % (cfg.get("schema"), af.SCHEMA))
+    for level, msg in af.validate_config(cfg):
+        report["fails" if level == "fail" else "warns"].append(msg)
+    report["missing_allow"] = af.missing_allow(project)
+    if report["enabled"] is False:
+        report["warns"].append("plugin đang disable trong project")
+    has_warn = bool(report["warns"] or report["missing_allow"])
+    if report["fails"]:
+        report["status"] = "incompatible"
+    elif has_warn:
+        report["status"] = "warn"
+    else:
+        report["status"] = "ok"
+    return report
+
+
+def label(item):
+    return item["project"] or "(scope %s)" % item["scope"]
+
+
+# ── commands ────────────────────────────────────────────────────────────────
+
+
+def cmd_plan(a):
+    state = release_state()
+    reports = [compat(i) for i in installs()]
+    if a.json:
+        print(json.dumps({"release": state, "installs": reports}, ensure_ascii=False, indent=2))
+        return 0
+    schema_note = ""
+    if state["schema_last_tag"] not in (None, state["schema"]):
+        schema_note = " (tag cuối: %s → bump ≥ minor)" % state["schema_last_tag"]
+    branch_note = "" if state["on_base"] else " (KHÔNG phải %s)" % state["base"]
+    unpushed = "?" if state["unpushed"] is None else state["unpushed"]
+    print("source %s v%s · %s · tag cuối %s · schema %s%s" % (
+        state["id"], state["version"], state["state"], state["last_tag"] or "—", state["schema"], schema_note))
+    print("nhánh %s%s · %d file chưa commit · %s commit chưa push · marketplace %s" % (
+        state["branch"], branch_note, len(state["dirty"]), unpushed, state["marketplace_source"]))
+    if not reports:
+        print("chưa project nào cài %s" % state["id"])
+    for r in reports:
+        target = "" if r["up_to_date"] else " → v%s" % state["version"]
+        print("%s %s · v%s%s · %s" % (mark(r), label(r), r["version"], target, r["status"]))
+        print_problems(r, warns=True)
+    return 0
+
+
+def mark(report):
+    return {"ok": "✓", "warn": "⚠"}.get(report["status"], "✗")
+
+
+def print_problems(report, warns):
+    for msg in report["fails"]:
+        print("    ✗ " + msg)
+    if not warns:
+        return
+    for msg in report["warns"]:
+        print("    ⚠ " + msg)
+    if report["missing_allow"]:
+        print("    ⚠ permissions.allow thiếu " + ", ".join(report["missing_allow"]))
+
+
+def cmd_bump(a):
+    path = manifest_path()
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    match = VERSION.search(text)
+    if not match:
+        sys.exit("✗ không thấy \"version\": \"x.y.z\" trong %s" % path)
+    major, minor, patch = (int(match.group(i)) for i in (2, 3, 4))
+    new = {"major": (major + 1, 0, 0), "minor": (major, minor + 1, 0), "patch": (major, minor, patch + 1)}[a.level]
+    old = "%d.%d.%d" % (major, minor, patch)
+    version = "%d.%d.%d" % new
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text[:match.start()] + match.group(1) + version + match.group(5) + text[match.end():])
+    print("%s → %s" % (old, version))
+    return 0
+
+
+def cmd_verify(_):
+    suite = os.path.join(plugin_dir(), "tests")
+    steps = [("validate", [claude_bin(), "plugin", "validate", plugin_dir()], 120),
+             ("test " + os.path.relpath(suite, ROOT), [sys.executable, "-I", "-m", "unittest", "discover", "-s", suite], 1200)]
+    bad = 0
+    for name, cmd, timeout in steps:
+        code, out, err = run(cmd, cwd=ROOT, timeout=timeout)
+        tail = (out + err).strip().splitlines()[-3:]
+        print("%s %s%s" % ("✓" if code == 0 else "✗", name, "" if code == 0 else "\n    " + "\n    ".join(tail)))
+        bad += code != 0
+    print("KẾT QUẢ: %s" % ("OK" if not bad else "%d bước fail — không phát hành" % bad))
+    return 1 if bad else 0
+
+
+def cmd_publish(a):
+    state = release_state()
+    if state["dirty"]:
+        sys.exit("✗ còn %d file chưa commit — commit trước rồi publish: %s" % (len(state["dirty"]), ", ".join(state["dirty"][:8])))
+    if state["state"] == "needs_bump":
+        sys.exit("✗ %s đã tag ở commit khác — bump version trước (agentflow-distribute bump patch|minor|major)" % state["tag"])
+    if not state["on_base"]:
+        sys.exit("✗ đang ở nhánh %s — chỉ phát hành từ %s" % (state["branch"], state["base"]))
+    if state["state"] == "unreleased":
+        code, out, err = run([claude_bin(), "plugin", "tag", plugin_dir(), "-m", "agentflow v%s"], cwd=ROOT)
+        if code != 0:
+            sys.exit("✗ claude plugin tag: %s" % (err or out).strip())
+    code, out, err = run(["git", "push", "--atomic", "origin", "HEAD:refs/heads/%s" % state["base"], "refs/tags/%s" % state["tag"]],
+                         cwd=ROOT, timeout=a.timeout)
+    result = {"tag": state["tag"], "head": state["head"], "pushed": code == 0}
+    if code != 0:
+        result["error"] = (err or out).strip()[-400:]
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if code == 0 else 3
+
+
+def cmd_install(a):
+    mkt = marketplace()[0]
+    version = source_version()
+    targets = select(installs(), a.project)
+    if not targets:
+        print(json.dumps({"version": version, "installs": []}))
+        return 0
+    stale = stale_installs(targets, version)
+    if stale:
+        sys.exit("✗ %s đã cài v%s từ cây khác (cache khoá theo version, update sẽ không refresh) — bump version trước: %s" % (
+            plugin_id(), version, ", ".join(label(i) for i in stale)))
+    code, out, err = run([claude_bin(), "plugin", "marketplace", "update", mkt], cwd=ROOT, timeout=180)
+    if code != 0:
+        sys.exit("✗ claude plugin marketplace update %s: %s" % (mkt, (err or out).strip()))
+    results = []
+    for item in targets:
+        cwd = item["project"] or ROOT
+        code, out, err = run([claude_bin(), "plugin", "update", plugin_id(), "--scope", item["scope"]], cwd=cwd, timeout=300)
+        after = next((i for i in installs() if i["project"] == item["project"] and i["scope"] == item["scope"]), {})
+        row = {"project": item["project"], "scope": item["scope"], "from": item["version"], "to": after.get("version"),
+               "ok": code == 0 and after.get("version") == version}
+        if not row["ok"]:
+            row["error"] = (err or out).strip()[-400:] or "version sau update là %s, mong đợi %s" % (after.get("version"), version)
+        results.append(row)
+    print(json.dumps({"version": version, "installs": results}, ensure_ascii=False, indent=2))
+    return 0 if all(r["ok"] for r in results) else 1
+
+
+def stale_installs(targets, version):
+    """Installs already on this version whose snapshot is not this tree: Claude Code would keep the old copy."""
+    head = git(["rev-parse", "HEAD"])
+    dirty = bool(git(["status", "--porcelain"]))
+    out = []
+    for item in targets:
+        same_version = item["version"] == version
+        same_tree = item["sha"] == head and not dirty
+        if same_version and not same_tree:
+            out.append(item)
+    return out
+
+
+def cmd_compat(a):
+    reports = [compat(i) for i in select(installs(), a.project)]
+    if a.json:
+        print(json.dumps(reports, ensure_ascii=False, indent=2))
+    else:
+        for r in reports:
+            print("%s %s · %s" % (mark(r), label(r), r["status"]))
+            print_problems(r, warns=a.warns)
+    return 1 if any(r["status"] in ("incompatible", "missing") for r in reports) else 0
+
+
+def cmd_source(_):
+    print(ROOT)
+    return 0
+
+
+def main():
+    global ROOT
+    p = argparse.ArgumentParser(prog="agentflow-distribute", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("source")
+    s = sub.add_parser("plan"); s.add_argument("--json", action="store_true")
+    s = sub.add_parser("bump"); s.add_argument("level", choices=("patch", "minor", "major"))
+    sub.add_parser("verify")
+    s = sub.add_parser("publish"); s.add_argument("--timeout", type=int, default=120)
+    s = sub.add_parser("install"); s.add_argument("--project", action="append")
+    s = sub.add_parser("compat"); s.add_argument("--project", action="append"); s.add_argument("--json", action="store_true")
+    s.add_argument("--warns", action="store_true", help="in cả ⚠ (key cũ, quyền)")
+    a = p.parse_args()
+    ROOT = resolve_source()
+    if ROOT is None:
+        print("✗ " + NO_SOURCE, file=sys.stderr)
+        return 2
+    exec_source_copy()
+    return {"source": cmd_source, "plan": cmd_plan, "bump": cmd_bump, "verify": cmd_verify, "publish": cmd_publish,
+            "install": cmd_install, "compat": cmd_compat}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

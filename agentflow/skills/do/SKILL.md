@@ -1,6 +1,6 @@
 ---
 name: do
-description: Xử lý MỘT issue chỉ định (#n) qua các stage agent làm được — SA thiết kế (giải pháp, rủi ro, test case) → DEV (code + flow automation, deploy staging, chạy flow, tự sửa ≤ 3 vòng) → SA review — cho tới khi nó dừng ở cổng của người (Ready to Merge, QC tay, cần thông tin, bị chặn).
+description: Xử lý MỘT issue chỉ định (#n) qua các stage agent làm được — SA thiết kế (giải pháp, rủi ro, test case) → DEV (code + flow automation) → SA review code → DEV (deploy staging, chạy flow, tự sửa ≤ 3 vòng) → SA chốt — tới cổng của người (Ready to Merge, QC tay, cần thông tin, bị chặn).
 argument-hint: "#<số issue>|<link issue> [--model sonnet|opus]"
 disable-model-invocation: true
 ---

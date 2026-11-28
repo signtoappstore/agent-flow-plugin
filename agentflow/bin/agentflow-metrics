@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""AgentFlow cost metrics from the local Claude Code transcripts (stdlib only, read-only, nothing leaves this machine).
+
+Every agentflow subagent writes a transcript under <claude dir>/projects/<project>/<session>/subagents/. This reads the
+spawns of this repo and reports, per ticket and per role/MODE: spawns, turns, peak context, tokens, agent minutes and SA
+reviews, so a change to the plugin can be measured against the numbers before it.
+
+  agentflow-metrics [--days N] [--issue N] [--project DIR] [--json]
+
+Token-eq = input + 0.1 × cache read + 1.25 × cache write + 5 × output: input-priced tokens, the ratios of Claude prices,
+so the cost share of each step is comparable across models. An estimate, not a bill.
+"""
+
+import argparse
+import datetime as dt
+import glob
+import json
+import os
+import re
+import statistics
+import subprocess
+import sys
+import time
+
+WEIGHTS = {"input_tokens": 1.0, "cache_read_input_tokens": 0.1, "cache_creation_input_tokens": 1.25, "output_tokens": 5.0}
+ISSUE = re.compile(r"ISSUE:\s*#?(\d+)")
+MODE = re.compile(r"MODE:\s*`?(\w+)")
+
+
+def project_dir(path):
+    """Claude Code keeps a project's transcripts under its absolute path with every non-alphanumeric turned into '-'."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    return os.path.join(base, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(path)))
+
+
+def repo_root():
+    try:
+        out = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return os.getcwd()
+    common = out.stdout.strip()
+    return os.path.dirname(common) if out.returncode == 0 and common.endswith("/.git") else os.getcwd()  # the main checkout, not a worktree
+
+
+def _ts(value):
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def read_spawn(path):
+    """One subagent transcript → its role, ticket, MODE, usage and duration; None when it is not an agentflow spawn."""
+    try:
+        with open(path[:-len(".jsonl")] + ".meta.json", encoding="utf-8") as fh:
+            role = str(json.load(fh).get("agentType") or "")
+    except (OSError, ValueError):
+        return None
+    if not role.startswith("agentflow:"):
+        return None
+    spawn = {"role": role.split(":", 1)[1], "issue": None, "mode": "", "turns": 0, "peak": 0, "minutes": 0.0,
+             "tokens": dict.fromkeys(WEIGHTS, 0)}
+    stamps = []
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            stamp = _ts(entry.get("timestamp")) if entry.get("timestamp") else None
+            if stamp:
+                stamps.append(stamp)
+            message = entry.get("message") or {}
+            if entry.get("type") == "user" and spawn["issue"] is None:
+                content = message.get("content")
+                text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+                found = ISSUE.search(text)
+                spawn["issue"] = int(found.group(1)) if found else 0
+                mode = MODE.search(text)
+                spawn["mode"] = mode.group(1) if mode else ""
+            usage = message.get("usage") if entry.get("type") == "assistant" else None
+            if usage:
+                spawn["turns"] += 1
+                for key in WEIGHTS:
+                    spawn["tokens"][key] += int(usage.get(key) or 0)
+                context = sum(int(usage.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+                spawn["peak"] = max(spawn["peak"], context)
+    if len(stamps) > 1:
+        spawn["minutes"] = (max(stamps) - min(stamps)).total_seconds() / 60
+    spawn["eq"] = sum(spawn["tokens"][k] * w for k, w in WEIGHTS.items())
+    spawn["start"] = min(stamps).isoformat() if stamps else None
+    return spawn
+
+
+def collect(folder, days, issue=None):
+    since = time.time() - days * 86400
+    spawns = []
+    for path in glob.glob(os.path.join(folder, "*", "subagents", "*.jsonl")):
+        if os.path.getmtime(path) < since:
+            continue
+        spawn = read_spawn(path)
+        if spawn and spawn["issue"] and (issue is None or spawn["issue"] == issue):
+            spawns.append(spawn)
+    return spawns
+
+
+def _median(values):
+    return statistics.median(values) if values else 0
+
+
+def report(spawns):
+    tickets = {}
+    for s in spawns:
+        t = tickets.setdefault(s["issue"], {"issue": s["issue"], "eq": 0.0, "minutes": 0.0, "spawns": 0, "sa_reviews": 0, "steps": {}})
+        t["eq"] += s["eq"]
+        t["minutes"] += s["minutes"]
+        t["spawns"] += 1
+        t["sa_reviews"] += s["role"] == "sa" and s["mode"] == "review"
+        step = "%s/%s" % (s["role"], s["mode"] or "?")
+        t["steps"][step] = t["steps"].get(step, 0) + 1
+    total = sum(s["eq"] for s in spawns) or 1
+    steps = {}
+    for s in spawns:
+        steps.setdefault("%s/%s" % (s["role"], s["mode"] or "?"), []).append(s)
+    by_step = [{"step": k, "spawns": len(v), "share": round(sum(x["eq"] for x in v) / total, 3),
+                "eq_median": round(_median([x["eq"] for x in v])), "turns_median": _median([x["turns"] for x in v]),
+                "peak_median": round(_median([x["peak"] for x in v])), "minutes_median": round(_median([x["minutes"] for x in v]), 1)}
+               for k, v in steps.items()]
+    by_step.sort(key=lambda r: -r["share"])
+    rows = sorted(tickets.values(), key=lambda t: -t["eq"])
+    return {"tickets": len(rows), "spawns": len(spawns),
+            "per_ticket": {"eq_median": round(_median([t["eq"] for t in rows])),
+                           "sa_reviews_mean": round(sum(t["sa_reviews"] for t in rows) / len(rows), 2) if rows else 0,
+                           "minutes_median": round(_median([t["minutes"] for t in rows]))},
+            "by_step": by_step, "top": [dict(t, eq=round(t["eq"]), minutes=round(t["minutes"])) for t in rows[:5]]}
+
+
+def mega(value):
+    return "%.1fM" % (value / 1e6)
+
+
+def print_text(res, days):
+    if not res["tickets"]:
+        print("AgentFlow metrics — chưa có lượt agent nào trong %d ngày (transcript ở máy này)" % days)
+        return
+    pt = res["per_ticket"]
+    print("AgentFlow metrics — %d ticket, %d spawn, %d ngày (token-eq: input + 0.1×cache read + 1.25×cache write + 5×output)"
+          % (res["tickets"], res["spawns"], days))
+    print("Mỗi ticket: trung vị %s token-eq · %s lần SA review (trung bình) · %d phút agent (trung vị)"
+          % (mega(pt["eq_median"]), pt["sa_reviews_mean"], pt["minutes_median"]))
+    for r in res["by_step"]:
+        print("  %-14s %3d%%  %3d spawn · trung vị %s · %d lượt · đỉnh context %dk · %.0f phút"
+              % (r["step"], round(r["share"] * 100), r["spawns"], mega(r["eq_median"]), r["turns_median"], r["peak_median"] // 1000,
+                 r["minutes_median"]))
+    print("Tốn nhất: " + " · ".join("#%d %s (%d review)" % (t["issue"], mega(t["eq"]), t["sa_reviews"]) for t in res["top"]))
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="agentflow-metrics", description=__doc__.split("\n\n", 1)[0])
+    p.add_argument("--days", type=int, default=30)
+    p.add_argument("--issue", type=int)
+    p.add_argument("--project", help="checkout chính của repo (mặc định: repo của thư mục hiện tại)")
+    p.add_argument("--json", action="store_true")
+    a = p.parse_args(argv)
+    res = report(collect(project_dir(a.project or repo_root()), a.days, a.issue))
+    if a.json:
+        print(json.dumps(res, ensure_ascii=False))
+    else:
+        print_text(res, a.days)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

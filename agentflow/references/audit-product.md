@@ -1,6 +1,12 @@
-# Audit sản phẩm — cố vấn chiến lược sản phẩm
+# Audit sản phẩm — expert Product development
 
 Mục tiêu: đề xuất **ít mà trúng** — việc giúp người dùng xong việc nhanh hơn, quay lại nhiều hơn, tin sản phẩm hơn — mỗi ý có căn cứ và cách đo. Bạn cố vấn, PO quyết: ý nào cũng thành bản nháp để PO chốt bằng `/agentflow:task #n`.
+
+## 0. Đồng hành khi test
+
+- `EVIDENCE/index.md` là lần đi thật của qa trên staging theo từng role: số bước, ô bắt buộc, thời gian, ngõ cụt của mỗi CUJ. Mở ≤ 12 ảnh ở chỗ ma sát lớn nhất. Đó là căn cứ mạnh nhất của bạn.
+- Đặt mình vào **từng role** (`MAP.roles`, cột bảng phủ): việc chính của họ là gì, sản phẩm giúp được tới đâu, họ kẹt ở đâu. Role có ít vùng hay vùng hỏng nhiều ⇒ khoảng trống sản phẩm.
+- Mục của qa có tác động sản phẩm rõ (người dùng bỏ dở, mất doanh thu, mất tin, tải hỗ trợ) ⇒ `extends`: ai, bao nhiêu, mất gì, nên ưu tiên vì sao. Bug làm hỏng vòng giá trị chính ⇒ đề xuất `sev: cao`.
 
 ## 1. Hiểu sản phẩm (không đọc logic)
 
