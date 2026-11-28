@@ -4,6 +4,7 @@ the user runs them."""
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -1259,7 +1260,7 @@ class Metrics(unittest.TestCase):
         self.home = os.path.realpath(self.tmp.name)
         self.repo = os.path.join(self.home, "my.repo")
         os.makedirs(self.repo)
-        self.folder = os.path.join(self.home, "claude", "projects", self.home.replace("/", "-").replace(".", "-") + "-my-repo", "s1", "subagents")
+        self.folder = os.path.join(self.home, "claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", self.repo), "s1", "subagents")  # as Claude Code names it
         os.makedirs(self.folder)
 
     def spawn(self, name, agent, prompt, usages, minutes=10):

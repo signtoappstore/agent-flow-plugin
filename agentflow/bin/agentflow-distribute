@@ -217,7 +217,7 @@ def installs():
     for entry in (data.get("plugins") or {}).get(plugin_id()) or []:
         path = entry.get("projectPath")
         out.append({"scope": entry.get("scope") or "user", "project": os.path.realpath(path) if path else None,
-                    "version": entry.get("version"), "sha": entry.get("gitCommitSha")})
+                    "version": entry.get("version"), "sha": entry.get("gitCommitSha"), "path": entry.get("installPath")})
     return out
 
 
@@ -420,16 +420,39 @@ def cmd_install(a):
 
 
 def stale_installs(targets, version):
-    """Installs already on this version whose snapshot is not this tree: Claude Code would keep the old copy."""
-    head = git(["rev-parse", "HEAD"])
-    dirty = bool(git(["status", "--porcelain"]))
+    """Installs already on this version whose snapshot differs from this tree: Claude Code would keep the old copy.
+    Judged by content, not by the recorded sha: an install taken from an uncommitted tree that was committed unchanged
+    is current although its sha is the older HEAD."""
     out = []
     for item in targets:
         same_version = item["version"] == version
-        same_tree = item["sha"] == head and not dirty
-        if same_version and not same_tree:
+        if same_version and not snapshot_matches(item.get("path")):
             out.append(item)
     return out
+
+
+def snapshot_matches(install_path):
+    """Every file git would ship from the plugin dir (tracked + untracked not ignored) is in the cache copy, byte for byte."""
+    if not install_path or not os.path.isdir(install_path):
+        return False
+    listed = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."], cwd=plugin_dir())
+    if listed is None:
+        return False
+    for rel in filter(None, listed.split("\0")):
+        src = os.path.join(plugin_dir(), rel)
+        if not os.path.isfile(src):  # deleted but still in the index
+            continue
+        if not same_bytes(src, os.path.join(install_path, rel)):
+            return False
+    return True
+
+
+def same_bytes(a, b):
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            return fa.read() == fb.read()
+    except OSError:
+        return False
 
 
 def cmd_compat(a):

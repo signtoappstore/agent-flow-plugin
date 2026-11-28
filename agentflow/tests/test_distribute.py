@@ -96,13 +96,14 @@ class Distribute(unittest.TestCase):
         self.write(os.path.join(self.home, "plugins", "installed_plugins.json"),
                    json.dumps({"version": 2, "plugins": {ID: self.installs}}))
 
-    def project(self, name, config=None, version="1.0.0", sha=None):
+    def project(self, name, config=None, version="1.0.0", sha=None, install_path=None):
         path = os.path.join(self.tmp, name)
         os.makedirs(path)
         sh(["git", "init", "-q", "-b", "master"], path)
         if config is not None:
             self.write(os.path.join(path, "agentflow.yaml"), config)
-        self.installs.append({"scope": "local", "projectPath": path, "version": version, "gitCommitSha": sha})
+        self.installs.append({"scope": "local", "projectPath": path, "version": version, "gitCommitSha": sha,
+                              "installPath": install_path})
         self.save_installs()
         return path
 
@@ -280,15 +281,30 @@ class Distribute(unittest.TestCase):
         self.assertFalse(rows[b]["ok"])
         self.assertIn("boom", rows[b]["error"])
 
+    def snapshot(self):
+        """What Claude Code copies into the cache at install: the plugin dir as it is now."""
+        path = os.path.join(self.home, "plugins", "cache", MKT, "agentflow", "1.2.3")
+        shutil.copytree(os.path.join(self.src, "agentflow"), path, ignore=shutil.ignore_patterns("__pycache__"))
+        return path
+
+    def test_same_version_with_identical_snapshot_is_current_whatever_its_sha(self):
+        # installed from an uncommitted tree that was then committed unchanged: the recorded sha is the older HEAD
+        self.project("same", self.template(), version="1.2.3", sha="0" * 40, install_path=self.snapshot())
+        res = self.tool("install")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(json.loads(res.stdout)["installs"][0]["ok"])
+
     def test_install_refuses_same_version_from_another_tree(self):
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.src, capture_output=True, text=True).stdout.strip()
-        self.project("same", self.template(), version="1.2.3", sha=head)
-        self.assertEqual(self.tool("install").returncode, 0)
-        self.write(os.path.join(self.src, "x.txt"), "x")
+        self.project("same", self.template(), version="1.2.3", install_path=self.snapshot())
+        self.write(os.path.join(self.src, "agentflow", "x.txt"), "x")
         res = self.tool("install")
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("bump version", res.stderr)
-        self.assertEqual(sum(c["args"][:3] == ["plugin", "marketplace", "update"] for c in self.calls()), 1)
+        self.assertFalse(any(c["args"][:3] == ["plugin", "marketplace", "update"] for c in self.calls()))
+
+    def test_same_version_without_a_snapshot_is_refused(self):
+        self.project("same", self.template(), version="1.2.3", install_path=os.path.join(self.tmp, "gone"))
+        self.assertNotEqual(self.tool("install").returncode, 0)
 
     def test_install_can_target_one_project(self):
         a = self.project("a", self.template())
