@@ -9,7 +9,7 @@ Bạn là **orchestrator cho đúng một ticket**: `$ARGUMENTS`. Đọc `${CLAU
 
 ## Khác với `/agentflow:run`
 
-1. **Tìm item**: `#n` hoặc link `…/<owner>/<repo>/issues/<n>` (repo khác origin ⇒ dừng). `issue_read method=get` (assert OPEN). `agentflow-board group <owner/repo> --issue <n> --subs`: `in_group` ⇒ dừng, đề nghị `/agentflow:do #<cha>`; `subs` khác rỗng = ticket cha (điểm 5). Lấy `item_id` + Status + Priority/Size bằng `list_project_items` (`query: "is:open is:issue repo:<owner>/<repo>"`, `field_names` như dispatch §2, paginate) và match `number` + `content.repository` — dừng paginate ngay khi thấy. Không có trên board → `add_project_item` rồi coi Status trống như `backlog`.
+1. **Tìm item**: `#n` hoặc link `…/<owner>/<repo>/issues/<n>` (repo khác origin ⇒ dừng). `issue_read method=get`; đã đóng ⇒ dừng, đề nghị mở lại + comment lý do. `agentflow-board group <owner/repo> --issue <n> --subs`: `in_group` ⇒ dừng, đề nghị `/agentflow:do #<cha>`; `subs` khác rỗng = ticket cha (điểm 5). Lấy `item_id` + Status + Priority/Size bằng `list_project_items` (`query: "is:open is:issue repo:<owner>/<repo>"`, `field_names` như dispatch §2, paginate) và match `number` + `content.repository` — dừng paginate ngay khi thấy. Không có trên board → `add_project_item` rồi coi Status trống như `backlog`.
 2. **Ticket không có `labels.agent` mà assign cho người khác** → hỏi một câu xác nhận trước khi tiếp quản; không trả lời thì dừng. Có `labels.agent` thì assignee không quan trọng.
 3. **Ticket không có `labels.agent` nhưng đang ở stage sau `ready`** (người tự làm dở) → hỏi xác nhận "agent tiếp quản #n ở <stage>?" — đồng ý thì gắn `labels.agent` rồi chạy theo bảng hành động.
 4. **`backlog`** (cha có `free`: điểm 5 trước) → cổng của PO: tóm tắt 3 dòng (AC, Size/Priority, còn thiếu gì; cha: các sub) rồi dừng, đề nghị `/agentflow:task #<n>` — hoàn thiện spec, chuyển Ready khi đạt cổng và PO xác nhận, rồi hỏi chạy `/do`. Không tự ghi `ready`, trừ SYS *grouped* sau khi người chọn ở điểm 5.
@@ -26,7 +26,13 @@ Bạn là **orchestrator cho đúng một ticket**: `$ARGUMENTS`. Đọc `${CLAU
 8. `--model` → ghi đè model của DEV cho ticket này.
 9. **Chế độ ask** (`clarify.implement`, mặc định) → SA design nhận `CLARIFY: ask-live`; RESULT `decide` hay ticket `needs_info` có state `plan: options|confirm` → cổng trong terminal theo `${CLAUDE_PLUGIN_ROOT}/references/clarify.md` §Điều phối: người chọn phương án, rồi xác nhận Sẽ thực hiện, DEV mới bắt đầu.
 
-Người dùng đang ngồi trước terminal: được hỏi **tối đa một câu** ở các điểm 2–6 trên. Sau khi bắt đầu chain thì không hỏi nữa, trừ cổng ask ở điểm 9 (trước khi DEV code).
+## Nhận lại ticket đã làm
+
+State có `design`/`pr` ⇒ trước chain: `agentflow-base drift --branch <branch> --since <design>` (bỏ phần thiếu), in ≤ 5 dòng **Nhận lại #n**: dừng ở đâu (Status, `step`, `part`, `next`), dùng lại gì (thiết kế, ✅ code @`approved`, flow @`test_sha` khi bằng head), base (`behind_base`, `overlap`, `conflict`, `since.files`), bước sẽ chạy.
+- `conflict`: `in_review` ⇒ SYS *sync* (dispatch §3); `in_qc`/`ready_to_merge` ⇒ hỏi "Sync <base> gỡ conflict? (về review code + chạy lại flow)", có ⇒ SYS *sync* → DEV `MODE=resume`. Không conflict ⇒ không thêm bước (DEV tự sync, protocol §8).
+- Mở lại (OPEN, Status `done`): lý do = comment của người sau `[AF:SYS] done`; không có ⇒ hỏi, ghi `[AF:SYS] decision`. Rồi SYS *reopened* → SA `MODE=design`.
+
+Người dùng đang ngồi trước terminal: được hỏi **tối đa một câu** ở các điểm 2–6 và Nhận lại. Sau khi bắt đầu chain thì không hỏi nữa, trừ cổng ask ở điểm 9 (trước khi DEV code).
 
 ## Báo cáo
 

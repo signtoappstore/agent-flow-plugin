@@ -1425,6 +1425,61 @@ class Base(unittest.TestCase):
         out = self.base("worktree", "7", "--branch", "feat/7-x")
         self.assertEqual((out["sync"], out["head"], out["behind_base"]), ("fresh", self.git(self.main, "rev-parse", "origin/master"), 0))
 
+    def ticket_with_pushed_work(self):
+        self.base("worktree", "7", "--branch", "feat/7-x")
+        self.write(self.wt, "a.txt", "mine\n")
+        self.write(self.wt, "b.txt", "b\n")
+        self.commit(self.wt, "b")
+        self.git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/feat/7-x")
+
+    def test_sync_base_merges_a_base_that_moved_elsewhere(self):
+        self.ticket_with_pushed_work()
+        self.push_from_other("master", "newer.txt")
+        out = self.base("worktree", "7", "--branch", "feat/7-x")  # without the flag: reported, not merged
+        self.assertEqual((out["behind_base"], out["base_overlap"], out["base_conflict"]), (1, [], []))
+        self.assertNotIn("base_sync", out)
+        out = self.base("worktree", "7", "--branch", "feat/7-x", "--sync-base")
+        self.assertEqual((out["base_sync"], out["behind_base"], out["ahead"]), ("merged", 0, 1))
+        self.assertEqual(out["head"], self.git(self.wt, "rev-parse", "HEAD"))
+        self.assertTrue(os.path.isfile(os.path.join(self.wt, "newer.txt")))
+        self.assertEqual(self.git(self.wt, "rev-list", "--count", "--merges", "origin/feat/7-x..HEAD"), "1")  # a merge, never a rebase
+        self.assertEqual(self.base("worktree", "7", "--branch", "feat/7-x", "--sync-base")["behind_base"], 0)
+
+    def test_sync_base_leaves_a_conflict_and_a_dirty_worktree_to_the_dev(self):
+        self.ticket_with_pushed_work()
+        self.push_from_other("master", "a.txt")  # the base rewrote the line the ticket changed
+        out = self.base("worktree", "7", "--branch", "feat/7-x", "--sync-base")
+        self.assertEqual((out["base_sync"], out["base_overlap"], out["base_conflict"]), ("conflict", ["a.txt"], ["a.txt"]))
+        self.assertIn("merge origin/master", out["next"])
+        self.assertEqual(self.git(self.wt, "status", "--porcelain"), "")  # nothing half-merged left behind
+        self.assertEqual(self.git(self.wt, "rev-parse", "HEAD"), self.git(self.main, "rev-parse", "origin/feat/7-x"))
+        self.write(self.wt, "b.txt", "editing\n")
+        self.assertEqual(self.base("worktree", "7", "--branch", "feat/7-x", "--sync-base")["base_sync"], "dirty")
+
+    def test_drift_reads_origin_only(self):
+        self.ticket_with_pushed_work()
+        design = self.git(self.main, "rev-parse", "origin/master")
+        self.push_from_other("master", "a.txt")
+        self.push_from_other("master", "c.txt")
+        out = self.base("drift", "--branch", "feat/7-x", "--since", design)
+        self.assertEqual((out["remote"], out["behind_base"], out["overlap"], out["conflict"], out["merged"]),
+                         (True, 2, ["a.txt"], ["a.txt"], False))
+        self.assertEqual(out["since"], {"sha": design, "commits": 2, "files": ["a.txt", "c.txt"], "files_more": 0})
+        self.assertEqual(self.git(self.wt, "status", "--porcelain"), "")  # the worktree is not touched
+        out = self.base("drift", "--branch", "feat/9-none")
+        self.assertEqual(out["remote"], False)
+        self.assertNotIn("behind_base", out)
+        self.assertIn("error", self.base("drift", "--since", "0" * 40)["since"])
+
+    def test_drift_sees_a_branch_the_base_already_holds(self):
+        self.ticket_with_pushed_work()
+        self.git(self.other, "fetch", "-q", "origin")
+        self.git(self.other, "switch", "-q", "-C", "master", "origin/master")
+        self.git(self.other, "merge", "-q", "--no-ff", "--no-edit", "origin/feat/7-x")
+        self.git(self.other, "push", "-q", "origin", "master")
+        out = self.base("drift", "--branch", "feat/7-x")
+        self.assertEqual((out["merged"], out["behind_base"]), (True, 1))
+
     def test_base_from_git_base(self):
         self.git(self.main, "push", "-q", "origin", "master:main")
         self.write(self.main, "agentflow.yaml", self.CONFIG.replace("base: null", "base: main"))

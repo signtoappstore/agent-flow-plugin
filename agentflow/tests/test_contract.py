@@ -65,11 +65,17 @@ import afconfig  # noqa: E402
 # 3.15 also lets `/do #<parent>` offer one PR for every sub (SYS grouped, `agentflow-board group --subs` picks the
 # subs in tested code) and orders a group: code every sub, then one automation lượt: ~1.3k to the /do command (read
 # only by the orchestrator), ~0.3k each to protocol, dispatch, sa.md and dev.md.
+# 3.15 also picks a ticket back up efficiently: every DEV run with code merges the fresh origin/<base> first
+# (`agentflow-base worktree --sync-base`, tested code), a conflict found by `agentflow-base drift` before an SA review
+# goes straight to DEV (SYS sync) instead of costing an SA spawn that only says "sync", SA re-review skips what the base
+# merge brought in, a design older than the base is checked against the files the base changed, and a reopened ticket
+# starts a new round (SYS reopened). ~0.3k each to sa, dev, protocol, ~0.55k to dispatch, ~0.75k to /do (orchestrator
+# only): one avoided SA spawn (~1–2M token-eq) or one conflict found before staging instead of at merge pays for years of it.
 BUDGETS = {
-    "agents/sa.md": 12150, "agents/dev.md": 14900,
-    "references/protocol.md": 14700, "references/dispatch.md": 11050, "references/design.md": 2600, "references/automation.md": 7850,
+    "agents/sa.md": 12450, "agents/dev.md": 15400,
+    "references/protocol.md": 15000, "references/dispatch.md": 11650, "references/design.md": 2600, "references/automation.md": 7850,
     "references/engineering.md": 3250, "references/clarify.md": 6650,
-    "skills/init/SKILL.md": 11300, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 4300, "skills/doctor/SKILL.md": 2000,
+    "skills/init/SKILL.md": 11300, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 5100, "skills/doctor/SKILL.md": 2000,
     "skills/run/SKILL.md": 2450, "skills/status/SKILL.md": 3000, "skills/task/SKILL.md": 10150, "skills/init/references/board-setup.md": 5550,
     "agents/audit.md": 6450, "references/audit-qa.md": 6750, "references/audit-arch.md": 4800, "references/audit-product.md": 3850,
     "references/audit-ux.md": 6050, "skills/checklist/SKILL.md": 9250,
@@ -80,7 +86,7 @@ BUDGETS = {
 # The auditor reads one lens a spawn: qa (its reference + automation.md) is the costliest.
 SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"],
                "audit": ["references/audit-qa.md", "references/automation.md"]}
-PER_SPAWN_LIMIT = {"sa": 30000, "dev": 40550, "audit": 35500}  # 3.15 group order: +0.2k protocol, +0.25k sa/dev
+PER_SPAWN_LIMIT = {"sa": 30650, "dev": 41400, "audit": 35850}  # 3.15 group order: +0.2k protocol, +0.25k sa/dev; resume: +0.3k protocol, +0.3k sa/dev
 DESCRIPTION_LIMIT = 700
 
 
@@ -486,7 +492,13 @@ class StateMachine(unittest.TestCase):
         # 3.8: a ticket's work starts from origin/<base>; the main checkout is the person's and changes branch at any time
         ("references/protocol.md", r"\*\*Không dùng checkout chính\*\*.*Không tạo/đổi nhánh local", "agent không đọc code/luật ở nhánh người đang mở"),
         ("references/protocol.md", r"`git -C <wt> push origin HEAD:refs/heads/<branch>`", "worktree detached push bằng refspec đầy đủ"),
-        ("agents/dev.md", r"`agentflow-base worktree <n> --branch <branch>`", "DEV làm trong worktree từ origin, không nhánh local"),
+        ("agents/dev.md", r"`agentflow-base worktree <n> --branch <branch> --sync-base`", "DEV làm trong worktree từ origin, không nhánh local, base mới nhất"),
+        ("agents/dev.md", r"`base_sync`: `merged` ⇒ push.*`conflict` ⇒ theo `next`", "base đi tiếp được merge vào nhánh, conflict DEV giải"),
+        ("references/protocol.md", r"\*\*Đồng bộ base\*\*: lượt DEV có code merge `origin/<base>` mới nhất.*không rebase", "nhận lại ticket luôn trên base mới"),
+        ("references/dispatch.md", r"`agentflow-base drift --branch <branch>` có `conflict` \| SYS \*sync\* → DEV `MODE=resume`", "conflict gỡ trước, không tốn SA review chỉ để nói sync"),
+        ("agents/sa.md", r"merge `origin/<base>` ⇒ không phán phần base: `git log -p --no-merges.*--remerge-diff", "review lại không đọc phần base kéo vào"),
+        ("skills/do/SKILL.md", r"## Nhận lại ticket đã làm\n\nState có `design`/`pr` ⇒ trước chain: `agentflow-base drift", "gọi lại /do in kế hoạch nhận lại, đo base trước"),
+        ("references/dispatch.md", r"\*reopened\*.*`prev_pr` \+= PR cũ.*Status → `ready`", "ticket đã xong mở lại thành lượt mới"),
         ("agents/dev.md", r"Project skill `\$WT/\.claude/skills/", "luật của repo theo nhánh ticket, không theo checkout chính"),
         ("references/dispatch.md", r"`agentflow-base clean --issue <n>…`", "dọn worktree không mất commit chưa push"),
         ("skills/init/SKILL.md", r"git rev-parse --git-common-dir\)/info/exclude", "init không sửa .gitignore của project"),

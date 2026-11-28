@@ -14,7 +14,7 @@ Bạn là **orchestrator** cho lượt chạy này. Đọc, theo thứ tự:
 
 - `--max N` → ghi đè `run.max_tasks` cho lượt này.
 - `--parallel N` → ghi đè `run.parallel` (1 = tuần tự).
-- `--only sa|dev` → chỉ spawn agent đó, theo dòng khớp **đầu tiên** của bảng §3 (dòng của agent khác ⇒ bỏ qua ticket, không xét dòng sau). SYS *done* / *qc-manual-pass* vẫn chạy; SYS dẫn tới DEV (*feedback*, *qc-failed*, *requeue*, *confirmed*) chỉ khi có `dev`. Vd: SA thiết kế trước cả hàng Ready.
+- `--only sa|dev` → chỉ spawn agent đó, theo dòng khớp **đầu tiên** của bảng §3 (dòng của agent khác ⇒ bỏ qua ticket, không xét dòng sau). SYS *done* / *qc-manual-pass* vẫn chạy; SYS dẫn tới DEV (*feedback*, *qc-failed*, *requeue*, *confirmed*, *sync*) chỉ khi có `dev`. Vd: SA thiết kế trước cả hàng Ready.
 
 ## Vòng lặp
 

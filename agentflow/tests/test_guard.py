@@ -291,6 +291,10 @@ ROLES = [  # role, want, tool, input
     ("dev", "BLOCK", "Bash", {"command": "git worktree remove --force .claude/worktrees/af-8"}), ("dev", "ALLOW", "Bash", {"command": "git worktree remove --force .claude/worktrees/af-8-staging"}),
     # 3.8: a ticket's work starts from origin/<base> — detached ticket worktree, push HEAD:refs/heads/<branch>
     ("dev", "ALLOW", "Bash", {"command": "agentflow-base worktree 7 --branch feat/7-x"}),
+    ("dev", "ALLOW", "Bash", {"command": "agentflow-base worktree 7 --branch feat/7-x --sync-base"}),
+    ("sa", "ALLOW", "Bash", {"command": "agentflow-base drift --since 4be0a17"}),  # read-only: origin refs, no worktree
+    ("", "ALLOW", "Bash", {"command": "agentflow-base drift --branch feat/7-x --since 4be0a17"}),
+    ("sa", "ALLOW", "Bash", {"command": "git show --remerge-diff 3f2a9c1"}),
     # no local branch: the person's own branch must never be attached to, moved or collided with
     ("dev", "BLOCK", "Bash", {"command": "git -C .claude/worktrees/af-7 switch feat/7-x"}),
     ("dev", "BLOCK", "Bash", {"command": "git -C .claude/worktrees/af-7 checkout -b feat/7-x"}),

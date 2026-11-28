@@ -30,16 +30,16 @@ Prompt có: `REPO`, `ISSUE: #<n>`, `ITEM_ID`, `MODE` (`new` · `rework` · `resu
 
 ## 3. Worktree + branch
 
-Branch: `branch` của state block hoặc của feedback, không có thì dựng theo `git.branch`. `agentflow-base worktree <n> --branch <branch>` (protocol §8) → JSON, `WT` = `path`: ghi path thẳng vì biến không giữ qua lệnh Bash, hook chỉ cho đổi git trong đúng path này. `dirty` (WT bẩn) hay `ahead` = DEV trước chết giữa chừng: đọc `git diff`, làm tiếp, không reset, không stash. `sync` `behind`/`diverged` ⇒ làm theo `next`. Exit 1 (`error`) ⇒ `[AF:DEV] blocked` + lỗi.
+Branch: `branch` của state block hoặc của feedback, không có thì dựng theo `git.branch` (`prev_pr` có k PR ⇒ thêm `-r<k+1>`). `agentflow-base worktree <n> --branch <branch> --sync-base` (`verify`: bỏ cờ, chạy lại có cờ khi `base_overlap`/`base_conflict` khác rỗng; protocol §8) → JSON, `WT` = `path`: ghi path thẳng vì biến không giữ qua lệnh Bash, hook chỉ cho đổi git trong đúng path này. `dirty` (WT bẩn) hay `ahead` = DEV trước chết giữa chừng: đọc `git diff`, làm tiếp, không reset, không stash. `sync` `behind`/`diverged` ⇒ làm theo `next`. `base_sync`: `merged` ⇒ push, đọc phần base đổi ở `base_overlap` · `conflict` ⇒ theo `next`, chạy `check` · `dirty`/`later` ⇒ commit/merge nhánh trước rồi chạy lại. Exit 1 (`error`) ⇒ `[AF:DEV] blocked` + lỗi.
 
 Ghi start (chỉ `new`/`resume`; `resume` đã có `[AF:DEV] start` ⇒ bỏ): state block `stage: in_progress, branch, next`, comment `[AF:DEV] start` (một dòng: branch), gắn `labels.agent`, assignees = hiện tại ∪ login của bạn (`get_me`), Status → `in_progress` (compare-then-write, expected `STAGE`). `rework`: `STAGE` = `ready` (QC người trả về) ⇒ state `stage: in_progress`, Status → `in_progress`, giữ `qc_failed`, **không** reset round; `STAGE` = `in_progress` ⇒ bỏ bước này. `resume`: làm tiếp theo `part`, `next`.
 
 ## 4. Context trước khi code
 
-- **Bản đồ code** của thiết kế là điểm xuất phát: mở đúng `path:line` đó, chỉ dò thêm phần thiếu, gộp lệnh dò (protocol §9).
+- **Bản đồ code** của thiết kế là điểm xuất phát: mở đúng `path:line` đó, chỉ dò thêm phần thiếu, gộp lệnh dò (protocol §9). State `design` ≠ `base_sha` ⇒ `agentflow-base drift --since <design>`: file bản đồ trong `since.files` ⇒ dò lại dòng; thiết kế hết khớp base (contract, module nó dựa vào đã đổi) ⇒ gỡ `labels.agent`, state `next: SA thiết kế lại — base đổi <file>`, `RESULT: ready · abort`.
 - `CLAUDE.md` ở root và thư mục surface của `$WT` — luật cứng. Project skill `$WT/.claude/skills/*/SKILL.md` khớp surface → Read **trước** khi code.
 - **Góp ý trên PR** (mọi MODE): từng mục `pending` + `notes` — đọc cả thread, code quanh `path:line`; xét đúng/hợp lý theo AC, thiết kế, `CLAUDE.md`, pattern repo, hiệu năng, bảo mật. Hợp lý ⇒ sửa, cả chỗ tương tự trong diff. Không ⇒ giữ code, trả lời lý do + bằng chứng. Người vẫn giữ ý sau câu trả lời của bạn ⇒ làm theo, trừ khi phạm AC, MUST, bảo mật ⇒ `needs_info`. Đổi scope/AC ⇒ `needs_info` hỏi PO.
-- `rework`: danh sách **bắt buộc** thêm (a) mục đánh số của verdict `[AF:SA] ❌` mới hơn `[AF:DEV] fixed|pr|reply` gần nhất, (b) comment lỗi của QC người (bản cũ: `[AF:QC] ❌`), (c) góp ý sau `[AF:SYS] escalated` hoặc lỗi block nếu có. Xử lý từng mục. Nhánh BEHIND base ⇒ `git merge origin/<base>` (không rebase commit đã push).
+- `rework`: danh sách **bắt buộc** thêm (a) mục đánh số của verdict `[AF:SA] ❌` mới hơn `[AF:DEV] fixed|pr|reply` gần nhất, (b) comment lỗi của QC người (bản cũ: `[AF:QC] ❌`), (c) góp ý sau `[AF:SYS] escalated` hoặc lỗi block nếu có. Xử lý từng mục.
 - Bug (issue hoặc QC người) ⇒ tái hiện trước bằng flow fail trên staging, rồi mới sửa. Không tái hiện được và bằng chứng không đủ ⇒ `needs_info`.
 - Có UI + design ⇒ đọc `${CLAUDE_PLUGIN_ROOT}/references/design.md`.
 

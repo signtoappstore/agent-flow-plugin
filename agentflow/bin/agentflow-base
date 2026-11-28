@@ -10,6 +10,14 @@ worktrees, branches, index or .gitignore: `.claude/worktrees/` goes to the repo'
   worktree <n> --branch B [--no-fetch]  create or refresh <root>/.claude/worktrees/af-<n>, detached at origin/B (branch on
                                         origin) or origin/<base> (new work); one JSON line. Push from it with
                                         `git -C <path> push origin HEAD:refs/heads/B`
+  worktree … --sync-base                also merge origin/<base> into the worktree when the base moved (clean worktree,
+                                        no conflict): `base_sync` merged · conflict (files in `base_conflict`) · dirty ·
+                                        later (bring origin/B in first). Never a rebase: commits may already be pushed
+  drift --branch B [--since SHA] [--no-fetch]
+                                        how far origin/<base> moved past a ticket, read from origin refs only: behind_base,
+                                        files both sides changed (`overlap`), files a merge of the base would conflict on
+                                        (`conflict`, null when git < 2.38 cannot tell), `merged` (the base holds the
+                                        branch); `--since` = files the base changed after that sha (the SA design's base)
   clean --issue N [--issue M ...] | --staging
                                         remove af-<n> worktrees that hold nothing unpushed · remove leftover af-*-staging
   audit [--no-fetch]                    create or reset <root>/.claude/worktrees/af-audit for /agentflow:checklist, detached
@@ -213,6 +221,44 @@ def refresh(path, branch, remote, start):
     return "diverged"
 
 
+def changed(cwd, frm, to):
+    return set(filter(None, (out(cwd, "diff", "--name-only", frm, to) or "").splitlines()))
+
+
+def drift(cwd, head, base_ref):
+    """What the base did since `head` left it. → {behind_base, overlap, conflict}; empty lists when the base did nothing."""
+    behind = count(cwd, base_ref, "--not", head)
+    report = {"behind_base": behind, "overlap": [], "conflict": []}
+    if not behind:
+        return report
+    fork = out(cwd, "merge-base", head, base_ref)
+    if fork:
+        report["overlap"] = sorted(changed(cwd, fork, head) & changed(cwd, fork, base_ref))
+    res = git(cwd, "merge-tree", "--write-tree", "--name-only", "--no-messages", head, base_ref)
+    if res.returncode == 1:
+        report["conflict"] = [line for line in res.stdout.split("\n\n")[0].splitlines()[1:] if line]
+    elif res.returncode != 0:
+        report["conflict"] = None  # git < 2.38: no merge-tree --write-tree
+    return report
+
+
+def sync_base(path, base, report):
+    """Merge origin/<base> into the worktree; a conflict is left to the DEV, who knows both intents."""
+    if not report["behind_base"]:
+        return
+    if report["sync"] in ("behind", "diverged"):
+        report["base_sync"] = "later"
+    elif report["dirty"]:
+        report["base_sync"] = "dirty"
+    elif not report["base_conflict"] and git(path, "merge", "-q", "--no-edit", "refs/remotes/origin/" + base).returncode == 0:
+        report.update(base_sync="merged", head=sha(path, "HEAD"), behind_base=0, ahead=unpushed(path))  # the merge commit to push
+    else:  # conflict known, or found by the merge when git could not tell beforehand (None)
+        if report["base_conflict"] is None:
+            git(path, "merge", "--abort")
+        report["base_sync"] = "conflict"
+        report["next"] = "`git -C %s merge origin/%s`, giải conflict giữ ý cả hai phía, commit" % (path, base)
+
+
 def cmd_worktree(a):
     root = root_of()
     cfg, base, base_sha = resolve(root, not a.no_fetch)
@@ -246,8 +292,36 @@ def cmd_worktree(a):
         state = submodules(path)
         if state:
             report["submodules"] = state
+    if report["behind_base"]:
+        moved = drift(path, "HEAD", "refs/remotes/origin/" + base)
+        report.update(base_overlap=moved["overlap"], base_conflict=moved["conflict"])
     if sync in ("behind", "diverged"):
         report["next"] = "commit phần dở rồi `git -C %s merge origin/%s`" % (path, branch)
+    if a.sync_base:
+        sync_base(path, base, report)
+    emit(report)
+
+
+def cmd_drift(a):
+    root = root_of()
+    _, base, base_sha = resolve(root, not a.no_fetch)
+    base_ref = "refs/remotes/origin/" + base
+    report = {"base": base, "base_sha": base_sha, "branch": a.branch}
+    if a.branch:
+        remote = fetch(root, a.branch) if not a.no_fetch else bool(sha(root, "refs/remotes/origin/" + a.branch))
+        report["remote"] = remote
+        if remote:
+            head = "refs/remotes/origin/" + a.branch
+            report.update(drift(root, head, base_ref), head=sha(root, head))
+            report["merged"] = git(root, "merge-base", "--is-ancestor", head, base_ref).returncode == 0
+    if a.since:
+        since = sha(root, a.since)
+        if not since:
+            report["since"] = {"sha": a.since, "error": "không có commit này trên origin/%s đã fetch" % base}
+        else:
+            files = sorted(changed(root, since, base_ref))
+            report["since"] = {"sha": a.since, "commits": count(root, base_ref, "--not", since), "files": files[:60],
+                               "files_more": max(0, len(files) - 60)}
     emit(report)
 
 
@@ -308,6 +382,11 @@ def main():
     s.add_argument("issue", type=int)
     s.add_argument("--branch", required=True)
     s.add_argument("--no-fetch", action="store_true", help="dùng origin/* đã fetch, không gọi mạng")
+    s.add_argument("--sync-base", action="store_true", help="merge origin/<base> vào worktree khi base đã đi tiếp")
+    s = sub.add_parser("drift")
+    s.add_argument("--branch", help="nhánh ticket (có trên origin thì đo base đi bao xa so với nó)")
+    s.add_argument("--since", help="sha base lúc SA thiết kế (state design): file base đổi từ đó")
+    s.add_argument("--no-fetch", action="store_true", help="dùng origin/* đã fetch, không gọi mạng")
     s = sub.add_parser("clean")
     s.add_argument("--issue", type=int, action="append")
     s.add_argument("--staging", action="store_true", help="dọn worktree staging tạm còn sót (không có agent đang chạy)")
@@ -316,7 +395,9 @@ def main():
     a = p.parse_args()
     if a.cmd == "clean" and not (a.issue or a.staging):
         p.error("clean cần --issue N hoặc --staging")
-    {"worktree": cmd_worktree, "clean": cmd_clean, "audit": cmd_audit}[a.cmd](a)
+    if a.cmd == "drift" and not (a.branch or a.since):
+        p.error("drift cần --branch B hoặc --since SHA")
+    {"worktree": cmd_worktree, "drift": cmd_drift, "clean": cmd_clean, "audit": cmd_audit}[a.cmd](a)
 
 
 if __name__ == "__main__":
