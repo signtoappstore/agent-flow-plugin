@@ -57,8 +57,6 @@ import afconfig  # noqa: E402
 # GitHub, qa runs area × role and writes an evidence pack, ux/product/arch read it and add views to qa's findings) adds
 # audit-ux.md and ~1.5k to each other audit file, ~2.6k to the command. No ticket spawn reads them; the qa audit spawn
 # grows ~3.4k (the role matrix, fix verification, evidence pack), small next to the flows, logs and ≤ 40 images it reads.
-# 3.14 also adds /agentflow:distribute (~4.5k, read only when the maintainer releases; the mechanics are in
-# bin/agentflow-distribute) and shortens /learn's release step to that script.
 # 3.15 (/agentflow:checklist also says what still keeps the product a prototype: prototype traces, design system, icons,
 # assets, graphics, app identity, copy; ux grades each tested area Prototype · Beta · Production, kept in the coverage map)
 # adds ~2.3k to audit-ux.md, ~0.5k to audit.md, ~0.35k to product/arch, ~0.6k to the command. The counting is in tested
@@ -74,7 +72,7 @@ BUDGETS = {
     "skills/init/SKILL.md": 11300, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 4300, "skills/doctor/SKILL.md": 2000,
     "skills/run/SKILL.md": 2450, "skills/status/SKILL.md": 3000, "skills/task/SKILL.md": 10150, "skills/init/references/board-setup.md": 5550,
     "agents/audit.md": 6450, "references/audit-qa.md": 6750, "references/audit-arch.md": 4800, "references/audit-product.md": 3850,
-    "references/audit-ux.md": 6050, "skills/checklist/SKILL.md": 9250, "skills/distribute/SKILL.md": 4600,
+    "references/audit-ux.md": 6050, "skills/checklist/SKILL.md": 9250,
 }
 # What a spawn reads before it looks at the ticket: its prompt, the protocol and the references it always reads.
 # 2.x DEV paid 9.3k + 12.1k + 8.3k (it read the reviewer prompt to self-review); the shared engineering.md replaced that.
@@ -118,7 +116,7 @@ def headings(rel):
 
 TEMPLATE = afconfig.parse_yaml(read("agentflow.yaml"))
 AGENTS = ["sa", "dev", "audit"]
-SKILLS = ["checklist", "distribute", "do", "doctor", "init", "learn", "run", "status", "task"]
+SKILLS = ["checklist", "do", "doctor", "init", "learn", "run", "status", "task"]
 LENSES = ["qa", "ux", "arch", "product"]
 
 

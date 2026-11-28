@@ -8,7 +8,6 @@ AgentFlow chạy trên máy của bạn, bằng token của bạn. Plugin không
 | Nội dung file thiết kế | Figma MCP (`mcp.figma.com`) | Chỉ khi `design.figma: true` và bạn đã OAuth |
 | Tên repo, số issue, tiêu đề ticket, link | Telegram Bot API (`api.telegram.org`) | Chỉ khi `notify.telegram: true` |
 | Code và nội dung agent đọc | Anthropic, theo điều khoản tài khoản Claude Code của bạn | Như mọi session Claude Code |
-| Commit + tag của source plugin | `origin` của repo plugin (GitHub), qua `git push` | `/agentflow:distribute`, chỉ sau khi bạn xác nhận; danh sách project lấy từ `~/.claude/plugins/*.json` trên máy, không gửi đi |
 | Từ khoá lĩnh vực sản phẩm (không tên khách hàng, code, dữ liệu nội bộ) | Công cụ WebSearch của Claude Code | `/agentflow:checklist product`, khi tìm kỳ vọng phổ biến của người dùng; `ux`, khi tìm app cùng lĩnh vực làm mốc production mà `audit.benchmarks` trống |
 
 **Lưu trên máy**

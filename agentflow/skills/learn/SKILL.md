@@ -1,7 +1,7 @@
 ---
 name: learn
-description: Tự học cho AgentFlow — gom friction từ journal (review/QC fail, feedback của người, call lỗi, retry, convention bị sửa) và từ bài học bạn truyền vào, khử trùng thành vài bài học, đề xuất minimal diff vào source của plugin, bạn duyệt rồi mới ghi, bump version, validate và phát hành để lần chạy sau làm đúng hơn.
-argument-hint: "[bài học tự do] [--release] [--no-release]"
+description: Tự học cho AgentFlow — gom friction từ journal (review/QC fail, feedback của người, call lỗi, retry, convention bị sửa) và từ bài học bạn truyền vào, khử trùng thành vài bài học, đề xuất minimal diff vào source của plugin, bạn duyệt rồi mới ghi, bump version và validate để lần chạy sau làm đúng hơn.
+argument-hint: "[bài học tự do]"
 disable-model-invocation: true
 ---
 
@@ -17,13 +17,11 @@ SUB=$(jq -r '.plugins[]|select(.name=="agentflow").source' "$ROOT/.claude-plugin
 SRC="$ROOT/${SUB#./}"; test -f "$SRC/.claude-plugin/plugin.json" && echo "SRC=$SRC" || echo "NO_SOURCE"
 ```
 
-`NO_SOURCE` (marketplace dạng github, máy không giữ source) → **dừng**: đề nghị mở issue/PR trên repo plugin, kèm bài học đã soạn. Version cache ≠ version source → báo một dòng (lần release này ship cả backlog).
-
-`--release` → bỏ qua §1–§5, nhảy §6 từ bước 2 (không có diff mới để áp, version đã bump).
+`NO_SOURCE` (marketplace dạng github, máy không giữ source) → **dừng**: đề nghị mở issue/PR trên repo plugin, kèm bài học đã soạn.
 
 ## 1. Gom
 
-- `agentflow-journal list` (entry `new`) + `$ARGUMENTS` (bỏ flag).
+- `agentflow-journal list` (entry `new`) + `$ARGUMENTS`.
 - Trống cả hai → mine session hiện tại: người phải sửa lại agent, call phải thử ≥ 2 lần, lệnh check sai, convention bị chỉnh. Vẫn không có gì → hỏi: "Bài học lần này là gì?"
 - Cần bằng chứng thêm → đọc **đúng** verdict `[AF:SA] ❌` / `[AF:DEV] blocked` / comment người mà entry trỏ tới (repo + issue), không đọc lan.
 
@@ -66,11 +64,10 @@ Gộp entry cùng gốc thành **≤ 5 bài học**, mỗi bài một dòng: `ag
 
 Trình **một lần**: danh sách bài học → file → diff → mức bump (`patch` mặc định; thêm năng lực → `minor`). Chờ duyệt. Chưa duyệt chưa ghi gì.
 
-## 6. Ghi, phát hành, đóng journal
+## 6. Ghi, kiểm, đóng journal
 
 1. Áp diff vào `$SRC`. Bump `version` trong `$SRC/.claude-plugin/plugin.json` (một lần cho cả lượt).
 2. `claude plugin validate "$SRC"` — fail → giữ edit, in lỗi, dừng.
-3. `python3 -I -m unittest discover -s "$SRC/tests"` phải pass hết trước khi phát hành. Sửa guard hoặc script → thêm case mới vào đúng file test.
+3. `python3 -I -m unittest discover -s "$SRC/tests"` phải pass hết. Sửa guard hoặc script → thêm case mới vào đúng file test.
 4. `agentflow-journal mark <id…> --as applied --ref v<NEW>` (và `--as dismissed` cho entry bị loại).
-5. Trừ khi `--no-release`: kiểm `git -C "$SRC" status --porcelain` (file bẩn ngoài lượt này → liệt kê, hỏi), rồi hỏi một lần và chạy `agentflow-distribute install` (mọi project đang cài) rồi `compat`; ✗ → nhắc `/agentflow:distribute` (sửa config project, phát hành).
-6. Báo: version cũ → mới, file đổi, bài học đã áp. Nhắc **restart Claude Code**. Schema đổi → nhắc chạy lại `/agentflow:init` ở mỗi repo. Hỏi (không tự làm) có commit `$SRC` với message `learn: <tóm tắt> (v<NEW>)` không. Không bao giờ push.
+5. Báo: version cũ → mới, file đổi, bài học đã áp. Schema đổi → nhắc chạy lại `/agentflow:init` ở mỗi repo. Hỏi (không tự làm) có commit `$SRC` với message `learn: <tóm tắt> (v<NEW>)` không. Không bao giờ push.

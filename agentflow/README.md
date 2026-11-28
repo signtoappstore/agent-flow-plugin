@@ -14,7 +14,7 @@ Agent tự chạy ticket trên GitHub Projects board **tới cổng của con ng
 - **Một plugin, nhiều repo** — tên cột, label, nhánh, lệnh check của từng repo nằm trong `agentflow.yaml`; plugin chỉ giữ ngữ nghĩa.
 - **Tối ưu token** — lệnh chỉ load khi gọi, mỗi ticket một subagent (session chính chỉ giữ 3 dòng kết quả), thiết kế của SA để DEV khỏi dò code lại và để SA review nhanh theo chính thiết kế đó, không có QC agent (DEV vốn đã build app và biết UI nên tự viết + chạy flow trong cùng một lượt), chỉ chạy flow của ticket + danh sách Regression SA chốt (có trần `run.max_regression`; diff chỉ chạm backend thì chỉ trên web), flow mới chạy 1 lần khi sửa và thêm 2 lần ở head cuối, DEV chạy flow trong lượt verify với context mới, lệnh dài chạy tách và chờ từng bước < 180 giây (harness đẩy nền lệnh dài hơn, mỗi lần poll đọc lại cả context), xem ảnh khi fail, review lặp lại chỉ soát diff mới, chờ pipeline theo nhịp giữ prompt cache, lệnh check lưu sẵn trong config, output dài vào log.
 - **Code luôn từ `origin/master`** (hoặc `git.base`) — mỗi ticket một worktree **detached** tạo từ `origin/master` vừa fetch (ticket đã có nhánh trên remote: từ `origin/<branch>`), không tạo nhánh local (hook chặn DEV tạo hay gắn vào nhánh local); `CLAUDE.md`, code đọc trong worktree hoặc ở base trên remote. Không đụng checkout chính của bạn: không đổi nhánh, không stash, không sửa `.gitignore` (`.claude/worktrees/` ghi vào `.git/info/exclude`), không prune worktree của bạn, không dời nhánh local nào. Bạn đổi nhánh, sửa dở, kể cả checkout đúng nhánh của ticket lúc agent đang chạy cũng không ảnh hưởng agent; nhánh bạn mở không có `agentflow.yaml` thì agent và hook dùng bản đã commit trên origin. Xong việc vẫn push nhánh ticket, merge lên staging và mở PR draft vào base.
-- **Tự học** — agent tự ghi friction vào journal; `/agentflow:learn` chưng cất thành diff nhỏ vào plugin, bạn duyệt rồi mới phát hành.
+- **Tự học** — agent tự ghi friction vào journal; `/agentflow:learn` chưng cất thành diff nhỏ vào plugin, bạn duyệt rồi mới ghi.
 
 ## Luồng
 
@@ -171,8 +171,7 @@ claude plugin enable  agentflow@agent-flow-plugins --scope local
 | `/agentflow:checklist [qa] [ux] [product] [arch]` | **Kiểm thử toàn sản phẩm theo role + hội đồng chuyên gia**: bản đồ mọi màn/API/role, qa test vùng × role trên staging (đúng quyền, bị chặn đúng quyền, xác minh lỗi đã sửa), rồi UI/UX designer (cả mức sẵn sàng production: design system, icon, asset, minh hoạ, nhận diện app), Product, Engineering cùng đọc bằng chứng và thêm góc nhìn; checklist có bằng chứng và mức độ, bạn chọn mục → ticket ở **Backlog** dưới issue checklist cha, có Sức khoẻ + Bản đồ phủ để lượt sau phủ tiếp vùng chưa test, test lại vùng vừa đổi, báo tái phát. `--focus`, `--areas N\|all`, `--max N` |
 | `/agentflow:status` | Đếm theo stage, việc chờ người, bất thường. `--metrics`: cycle time, first-pass yield, số lần fail, aging, token + phút agent mỗi ticket/bước (`agentflow-metrics`) + thống kê journal |
 | `/agentflow:doctor` | Kiểm config, token/scope, board mapping, label, MCP, hook, Figma, Telegram — chỉ cách sửa từng lỗi |
-| `/agentflow:learn [bài học]` | Gom journal + bài học → diff nhỏ vào source plugin → bạn duyệt → bump version → validate → phát hành |
-| `/agentflow:distribute [patch\|minor\|major]` | Chỉ máy giữ source plugin: bump → verify → commit → (bạn xác nhận) tag + push → cài bản mới lên **mọi project đang dùng** → project nào bản mới không đọc được config (schema, key bắt buộc, key cũ) thì agent sửa `agentflow.yaml` cho tương thích, hỏi bạn giá trị không suy được, rồi hỏi commit. `--no-publish` chỉ cài, `--project <dir>` chọn project |
+| `/agentflow:learn [bài học]` | Gom journal + bài học → diff nhỏ vào source plugin → bạn duyệt → bump version → validate + unit test |
 
 ## Bên trong
 
@@ -196,7 +195,6 @@ claude plugin enable  agentflow@agent-flow-plugins --scope local
 | `bin/agentflow-base` | Worktree ticket tính từ remote base: `worktree <n> --branch B` (tạo/cập nhật worktree ticket detached từ `origin/B` hoặc `origin/<base>` vừa fetch, việc chưa bắt đầu thì dời lên base mới, giữ phần dở, fast-forward/merge khi có người push vào nhánh, từ chối bỏ việc chưa push của nhánh khác, init submodule) · `clean` (orchestrator dọn worktree, không bao giờ xoá commit chưa push) · `audit` (worktree `af-audit` cho `/agentflow:checklist`, đặt lại về `origin/<base>` mỗi lần, giữ deps đã cài) |
 | `bin/agentflow-e2e` | `select`: flow có sẵn cần chạy lại cho một thay đổi + lý do (SA lúc thiết kế, DEV khi diff lệch thiết kế) · `run`: chạy flow Maestro tách khỏi shell của agent (lặp, nhiều thiết bị, `--env-file` không lộ giá trị; `--install` build + cài app khi thiết bị chưa có đúng bản; `--baseline` chạy flow mới trên bản chưa có thay đổi — staging hiện tại hoặc bản đang cài — để chứng minh flow đỏ trước khi xanh, tự bỏ qua khi bản đó đã có commit của ticket; mỗi thiết bị một ticket một lúc, lượt sau báo `queued`) · `wait`: chờ ≤ 160 giây rồi in một dòng JSON (flow fail + bước + log), `--log` cho build chạy tách |
 | `bin/agentflow-metrics` | Token-eq (input + 0.1×cache read + 1.25×cache write + 5×output), lượt, đỉnh context, phút agent mỗi ticket và mỗi bước (role/MODE), số lần SA review — đọc transcript Claude Code trên máy, không gửi đi đâu; dùng để đo trước/sau khi đổi plugin |
-| `bin/agentflow-distribute` | Phát hành + phân phối cho `/agentflow:distribute`: `plan` (trạng thái release, mọi bản cài trong `~/.claude/plugins/installed_plugins.json`, compat offline từng project) · `bump` · `verify` · `publish` (tag + push nhánh và tag một lần) · `install` (`plugin update` trong từng project, kiểm version) · `compat` (phán bằng `SCHEMA` + `validate_config` của bản mới). Tự tìm source; bản trong cache chuyển sang chạy bản của source |
 | `bin/agentflow-journal` · `agentflow-notify` · `agentflow-settings` | Journal tự học (`~/.claude/agentflow/journal.jsonl`) · ping Telegram · sửa settings local và chạy lệnh với `env` của nó, không lộ secret |
 | `scripts/mcp-headers.py` | `headersHelper` cấp token cho GitHub MCP lúc connect |
 | `templates/` | Issue form, PR template, README board |
@@ -220,7 +218,7 @@ Khi đó lớp chặn là **hook guard** của plugin (luôn chạy, kể cả b
 
 1. Agent gặp friction (review/QC fail mà lẽ ra tự bắt được, call phải thử lại, người sửa convention, phải tự dò lệnh check…) → `agentflow-journal add …` một dòng.
 2. `/agentflow:status --metrics` cho thấy chỗ đau (first-pass yield, aging).
-3. `/agentflow:learn` → ≤ 5 bài học, mỗi bài một diff nhỏ vào đúng file (có trần ký tự để prompt không phình), gate theo `DESIGN-NOTES.md` §Non-goals, bạn duyệt → bump → `claude plugin validate` → `marketplace update` + `plugin update` → restart.
+3. `/agentflow:learn` → ≤ 5 bài học, mỗi bài một diff nhỏ vào đúng file (có trần ký tự để prompt không phình), gate theo `DESIGN-NOTES.md` §Non-goals, bạn duyệt → bump → `claude plugin validate` + unit test.
 
 ## Phát triển
 
