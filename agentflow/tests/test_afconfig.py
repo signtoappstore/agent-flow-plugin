@@ -212,6 +212,19 @@ jobs:
         warns = [m for level, m in afconfig.validate_config(cfg) if level == "warn"]
         self.assertTrue(any("clarify.review" in m for m in warns))
 
+    def test_audit_benchmarks_are_optional_names_or_urls(self):
+        cfg = filled_config()
+        self.assertEqual(cfg["audit"], {"benchmarks": []})  # the template carries the key
+        cfg["audit"] = {"benchmarks": ["App A", "https://b.example"]}
+        self.assertEqual(self.problems(cfg), [])
+        cfg["audit"] = {"benchmarks": "App A"}
+        self.assertTrue(any("audit.benchmarks" in m for m in self.problems(cfg)))
+        cfg["audit"] = {"benchmarks": [], "lens": "ux"}
+        warns = [m for level, m in afconfig.validate_config(cfg) if level == "warn"]
+        self.assertTrue(any("audit.lens" in m for m in warns))
+        del cfg["audit"]
+        self.assertEqual(self.problems(cfg), [])
+
     def test_legacy_e2e_ci_only_warns(self):
         cfg = filled_config()
         cfg["surfaces"] = {"web": {"path": "web/", "e2e_dir": ".maestro", "e2e_ci": True}, "api": {"path": "api/", "e2e_ci": False}}

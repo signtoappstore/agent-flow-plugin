@@ -25,7 +25,7 @@ PLATFORM_KEY = "platform"  # labels.platform: platform name → label, optional 
 WORKFLOW_FILE = re.compile(r"^[\w.-]+\.ya?ml$")
 INPUT_NAME = re.compile(r"^[A-Za-z_][\w-]*$")
 TOP_KEYS = {"schema", "lang", "board", "classify", "types", "labels", "git", "surfaces", "e2e_map", "forbidden", "design", "staging",
-            "clarify", "people", "run", "notify"}
+            "clarify", "audit", "people", "run", "notify"}
 CLARIFY_GATES = ("task", "implement")
 CLARIFY_MODES = ("ask", "auto")
 NOTIFY_EVENTS = {"blocked", "needs_info", "qc_manual", "ready_to_merge"}
@@ -303,6 +303,21 @@ def _check_clarify(clarify, fail, warn):
             fail("clarify.%s phải là ask hoặc auto (đang là %r)" % (gate, mode))
 
 
+def _check_audit(audit, fail, warn):
+    """`audit` is optional: /agentflow:checklist reads `benchmarks` (apps ux compares the product with)."""
+    if audit is None:
+        return
+    if not isinstance(audit, dict):
+        fail("audit phải là map, vd {benchmarks: [\"<app cùng lĩnh vực>\"]}")
+        return
+    for key in audit:
+        if key != "benchmarks":
+            warn("audit.%s lạ — plugin chỉ đọc audit.benchmarks" % key)
+    bench = audit.get("benchmarks")
+    if bench is not None and not (isinstance(bench, list) and all(isinstance(b, str) and b.strip() for b in bench)):
+        fail("audit.benchmarks phải là danh sách tên app hoặc URL, vd [\"Tên app\", \"https://example.com\"]")
+
+
 def platform_labels(cfg):
     """labels.platform as {platform: label}; {} when the repo has none."""
     value = ((cfg or {}).get("labels") or {}).get(PLATFORM_KEY)
@@ -515,6 +530,7 @@ def validate_config(cfg):
         fail("staging.skip_checks phải là danh sách tên check (glob), vd [\"distribute-mobile*\"]")
     _check_workflows(cfg, fail, warn)
     _check_clarify(cfg.get("clarify"), fail, warn)
+    _check_audit(cfg.get("audit"), fail, warn)
     models = (cfg.get("run") or {}).get("models") or {}
     if not isinstance(models.get("dev") or {}, dict) or not (models.get("dev") or {}).get("default"):
         fail("run.models.dev.default chưa khai báo")

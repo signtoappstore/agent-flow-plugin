@@ -59,14 +59,19 @@ import afconfig  # noqa: E402
 # grows ~3.4k (the role matrix, fix verification, evidence pack), small next to the flows, logs and ≤ 40 images it reads.
 # 3.14 also adds /agentflow:distribute (~4.5k, read only when the maintainer releases; the mechanics are in
 # bin/agentflow-distribute) and shortens /learn's release step to that script.
+# 3.15 (/agentflow:checklist also says what still keeps the product a prototype: prototype traces, design system, icons,
+# assets, graphics, app identity, copy; ux grades each tested area Prototype · Beta · Production, kept in the coverage map)
+# adds ~2.3k to audit-ux.md, ~0.5k to audit.md, ~0.35k to product/arch, ~0.6k to the command. The counting is in tested
+# code (`agentflow-audit ready`, the grade check in `findings`); no ticket spawn reads these files, and the qa spawn only
+# grows by audit.md's ~0.5k.
 BUDGETS = {
     "agents/sa.md": 11900, "agents/dev.md": 14650,
     "references/protocol.md": 14450, "references/dispatch.md": 10700, "references/design.md": 2600, "references/automation.md": 7850,
     "references/engineering.md": 3250, "references/clarify.md": 6650,
     "skills/init/SKILL.md": 11300, "skills/learn/SKILL.md": 5500, "skills/do/SKILL.md": 3000, "skills/doctor/SKILL.md": 2000,
     "skills/run/SKILL.md": 2450, "skills/status/SKILL.md": 3000, "skills/task/SKILL.md": 10150, "skills/init/references/board-setup.md": 5550,
-    "agents/audit.md": 6000, "references/audit-qa.md": 6750, "references/audit-arch.md": 4550, "references/audit-product.md": 3500,
-    "references/audit-ux.md": 3800, "skills/checklist/SKILL.md": 8750, "skills/distribute/SKILL.md": 4600,
+    "agents/audit.md": 6450, "references/audit-qa.md": 6750, "references/audit-arch.md": 4800, "references/audit-product.md": 3850,
+    "references/audit-ux.md": 6050, "skills/checklist/SKILL.md": 9250, "skills/distribute/SKILL.md": 4600,
 }
 # What a spawn reads before it looks at the ticket: its prompt, the protocol and the references it always reads.
 # 2.x DEV paid 9.3k + 12.1k + 8.3k (it read the reviewer prompt to self-review); the shared engineering.md replaced that.
@@ -74,7 +79,7 @@ BUDGETS = {
 # The auditor reads one lens a spawn: qa (its reference + automation.md) is the costliest.
 SPAWN_READS = {"sa": ["references/engineering.md"], "dev": ["references/engineering.md", "references/automation.md"],
                "audit": ["references/audit-qa.md", "references/automation.md"]}
-PER_SPAWN_LIMIT = {"sa": 29600, "dev": 40150, "audit": 34900}
+PER_SPAWN_LIMIT = {"sa": 29600, "dev": 40150, "audit": 35450}
 DESCRIPTION_LIMIT = 700
 
 
@@ -512,6 +517,11 @@ class StateMachine(unittest.TestCase):
         ("references/audit-qa.md", r"\*\*Bị chặn\*\*", "role không được phép phải bị chặn ở cả UI lẫn API"),
         ("references/audit-qa.md", r"\*\*verify #n\*\*", "lỗi đã đóng được chạy lại"),
         ("references/audit-ux.md", r"chỉ dùng token và component đang có", "ý đẹp hơn bám hệ thiết kế"),
+        ("references/audit-ux.md", r"Mục chỉ dựa trên mốc lĩnh vực ⇒ Improvement, không bao giờ Bug", "gu của app khác không thành Bug"),
+        ("references/audit-ux.md", r"chỉ vùng có ô `✓`/`✗`/`⛔` trong `COVER`", "chỉ chấm mức vùng có ảnh của lượt này"),
+        ("references/audit-ux.md", r"không gửi tên sản phẩm, code, dữ liệu nội bộ", "tìm app làm mốc không lộ dữ liệu của repo"),
+        ("references/audit-ux.md", r"`agentflow-audit findings` từ chối mức lệch", "mức sẵn sàng theo rubric, kiểm bằng code"),
+        ("skills/checklist/SKILL.md", r"agentflow-audit ready --map", "đếm dấu vết prototype, design system, asset trước khi ux xem ảnh"),
         ("references/audit-arch.md", r"\*\*Nguyên nhân gốc\*\*", "Engineering lần lỗi của qa tới code"),
         ("references/audit-qa.md", r"có thể do ticket đang làm", "lỗi của ticket chưa merge không thành bug của sản phẩm"),
         ("references/audit-arch.md", r"Số đo chỉ nói \*\*chỗ cần đọc\*\*", "radar không thay cho đọc code"),

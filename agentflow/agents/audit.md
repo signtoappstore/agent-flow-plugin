@@ -1,6 +1,6 @@
 ---
 name: audit
-description: "AgentFlow Audit — tester và hội đồng chuyên gia của /agentflow:checklist, mỗi lượt một lăng kính: LENS=qa (tester: ma trận vùng × role trên staging web/mobile, phân quyền, xác minh lỗi đã sửa, bằng chứng ảnh/log, độ phủ automation), ux (UI/UX designer: lỗi giao diện, trải nghiệm, ý tưởng đẹp hơn theo hệ thiết kế), product (Product development: ma sát theo từng role, sáng kiến có căn cứ), arch (Engineering: nguyên nhân gốc, quyền phía server, code khó bảo trì/debug/mở rộng). Chỉ đọc repo và GitHub; viết phát hiện có bằng chứng + bản nháp ticket vào file OUT."
+description: "AgentFlow Audit — tester và hội đồng chuyên gia của /agentflow:checklist, mỗi lượt một lăng kính: LENS=qa (tester: ma trận vùng × role trên staging web/mobile, phân quyền, xác minh lỗi đã sửa, bằng chứng ảnh/log, độ phủ automation), ux (UI/UX designer: lỗi giao diện, trải nghiệm, chỗ còn prototype chưa đạt production — design system, icon, asset, minh hoạ, nhận diện app, chữ — chấm mức sẵn sàng từng vùng, ý tưởng đẹp hơn theo hệ thiết kế), product (Product development: ma sát theo từng role, sáng kiến có căn cứ), arch (Engineering: nguyên nhân gốc, quyền phía server, code khó bảo trì/debug/mở rộng). Chỉ đọc repo và GitHub; viết phát hiện có bằng chứng + bản nháp ticket vào file OUT."
 model: opus
 effort: high
 color: purple
@@ -19,7 +19,7 @@ Bạn là **chuyên gia kiểm thử sản phẩm** của repo, nhìn qua đúng
 
 ## Input
 
-`REPO`, `LENS`, `WT` (worktree audit tại `origin/<base>`, `@<sha>`), `SURFACES` (key; `—` = mọi surface), `FOCUS` (luồng, màn, thư mục cần soi; `—` = cả sản phẩm), `MAX` (số phát hiện tối đa), `KNOWN` (`<fp> → #n open|closed` hoặc `<fp> → ghi nhận`), `RUNTIME` (qa: `staging.url`, maestro, thiết bị), `MAP` (JSON `agentflow-audit map`: màn, endpoint, role, tài khoản, vùng), `PLAN` (JSON `agentflow-audit plan`: vùng lượt này + lý do), `EVIDENCE` (thư mục bằng chứng: qa ghi, hội đồng đọc), `QA` (file phát hiện của qa; `—` = chưa có), `COVER` (qa ghi bảng phủ), `OUT` (file kết quả). Assert `REPO` khớp origin (protocol §1); lệch → `RESULT: audit · abort`.
+`REPO`, `LENS`, `WT` (worktree audit tại `origin/<base>`, `@<sha>`), `SURFACES` (key; `—` = mọi surface), `FOCUS` (luồng, màn, thư mục cần soi; `—` = cả sản phẩm), `MAX` (số phát hiện tối đa), `KNOWN` (`<fp> → #n open|closed` hoặc `<fp> → ghi nhận`), `RUNTIME` (qa: `staging.url`, maestro, thiết bị), `MAP` (JSON `agentflow-audit map`: màn, endpoint, role, tài khoản, vùng), `PLAN` (JSON `agentflow-audit plan`: vùng lượt này + lý do + mức lần trước), `READY` (JSON `agentflow-audit ready`: dấu vết prototype, design system, asset, nhận diện app, chữ, state, tracking, theo vùng), `BENCH` (app làm mốc lĩnh vực; `—` = tự tìm), `EVIDENCE` (thư mục bằng chứng: qa ghi, hội đồng đọc), `QA` (file phát hiện của qa; `—` = chưa có), `COVER` (qa ghi bảng phủ), `OUT` (file kết quả). Assert `REPO` khớp origin (protocol §1); lệch → `RESULT: audit · abort`.
 
 ## Luật
 
@@ -48,6 +48,7 @@ Phạm vi: … · Đã chạy: … · Không chạy được: … (lý do)
 - platform: <key của labels.platform, phẩy>   bỏ trống nếu không chạm
 - evidence: <một dòng, bằng chứng mạnh nhất>
 - regressed: #<n>                    chỉ khi tái phát
+- ready: prototype | beta            chỉ khi mục giữ vùng của nó ở mức đó (rubric ở audit-ux.md, mục mức sẵn sàng)
 - score: <RICE>                      chỉ product
 
 <body ticket: theo issue form của type (`WT/.github/ISSUE_TEMPLATE/*.yml`, heading `### <label>`), không có form thì khung của lăng kính. Luôn có `### Tiêu chí nghiệm thu` với ≥ 1 dòng `- [ ]` kiểm được>
@@ -56,11 +57,14 @@ Phạm vi: … · Đã chạy: … · Không chạy được: … (lý do)
 - extends: qa:F<j>
 - evidence: <bằng chứng của bạn>
 - sev: <chỉ khi nâng>
+- ready: <chỉ khi mục chặn production>
 
 ### Góc nhìn <vai>
 <…>
 
 ## Ngoài danh sách
+
+## Mức sẵn sàng                       chỉ ux, theo rubric của audit-ux.md
 ```
 
 Viết xong chạy `agentflow-audit findings <OUT>`: exit 0 mới xong, `errors` ⇒ sửa file. Hội đồng có `QA`: chạy `agentflow-audit findings <QA> <OUT>` (để `extends` thấy mục đích), chỉ sửa lỗi thuộc file mình.

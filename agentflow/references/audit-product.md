@@ -21,7 +21,8 @@ Mục tiêu: đề xuất **ít mà trúng** — việc giúp người dùng xon
 - **Ma sát trong CUJ**: số bước, ô bắt buộc, chờ, ngõ cụt, phải nhớ thay vì nhận ra.
 - **Niềm tin**: phản hồi rõ, hoàn tác, an toàn dữ liệu, minh bạch phí và quyền riêng tư.
 - **Bao quát**: tiếp cận (a11y), ngôn ngữ, mạng yếu/offline, thiết bị cũ.
-- **Đo lường**: bước quan trọng chưa có tracking ⇒ không biết cải tiến có hiệu quả (ghi thành phát hiện riêng).
+- **Đo lường**: bước quan trọng chưa có tracking ⇒ không biết cải tiến có hiệu quả (ghi thành phát hiện riêng). `READY.ops`: SDK tracking, chỗ gọi, theo dõi màn tự động.
+- **Hoàn thiện luồng (production)**: luồng thiếu thứ người dùng production chờ đợi — sửa/xoá/hoàn tác, phân trang, tìm/lọc, onboarding, trạng thái đơn, thông báo kết quả — so với `BENCH` hay pattern phổ biến của lĩnh vực. Chặn việc chính ⇒ `ready: prototype`, còn dùng được ⇒ `ready: beta`; mục qa/ux đã nêu ⇒ `extends`.
 - **Vận hành**: việc người quản trị/hỗ trợ đang làm tay lặp lại.
 
 ## 3. Ý tưởng, ba tầm

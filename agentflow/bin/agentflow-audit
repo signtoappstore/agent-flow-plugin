@@ -18,6 +18,13 @@ rank and file as tickets.
         Spring, Next/SvelteKit route files, Supabase functions) with an auth hint, roles the code names (enums, union
         types, SQL enums, role checks, isAdmin-like flags), the test accounts of each role in the secret folder
         `staging.notes` (key names only, never a value) and the areas (screen or API group) the coverage map tracks
+  ready [--map FILE] [--top N] [PATH ...]
+        production readiness of the UI code and assets: prototype traces (lorem, coming soon, fake people, placeholder images,
+        mock data, empty handlers, raw error text, hardcoded flags, template titles and files), drift from the design system
+        (colours, fonts, spacing off the 4-pt grid outside the token files, font sizes and radii in use, icon sets mixed,
+        emoji as icons), assets (heavy, raster icons, @2x/@3x and Android densities, unused, missing), app identity (app
+        icon, splash, favicon, manifest, share image), brand fonts, copy (l10n, hardcoded text, Vietnamese mixed with
+        English), screens without loading/empty/error states, tracking and crash reporting; --map adds the signals of each area
   plan --map FILE [--prev FILE] [--closed N,N] [--focus TEXT] [--max N]
         areas to test this run, from the last checklist's coverage map: a bug whose ticket is closed (verify the fix),
         code changed since the area was last tested, never tested, then the oldest
@@ -39,6 +46,7 @@ import datetime
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1147,12 +1155,667 @@ def cmd_map(a):
     emit(build_map(root, cfg, scope(cfg, a.paths), a.max_areas))
 
 
+# ── ready: production readiness ─────────────────────────────────────────────
+# What still makes a screen look like a prototype: traces a user sees, drift from the design system, assets and app identity
+# a store or a browser tab shows, copy, states, tracking. Counts point at the files to look at; ux confirms on the images.
+
+UI_EXT = (".tsx", ".jsx", ".vue", ".svelte")
+STYLE_EXT = (".css", ".scss", ".sass", ".less")
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg")
+RASTER_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+FONT_EXT = (".ttf", ".otf", ".woff", ".woff2")
+TEXT_EXT = set(LANGS) | {".json", ".xml", ".yaml", ".yml", ".html", ".plist", ".storyboard", ".xib", ".gradle", ".arb", ".strings",
+                         ".xcstrings", ".webmanifest"} | set(STYLE_EXT)
+TOKEN_FILE = re.compile(r"(^|/)(themes?|tokens|design[-_]?(?:system|tokens)|styles?/(?:variables|tokens|theme|colou?rs))/"
+                        r"|(^|/)[\w-]*?(colou?rs?|palette|typography|theme|tokens|dimens|spacing|radi(?:us|i)|shadows?|elevation)(\.[\w-]+)?\.\w+$"
+                        r"|tailwind\.config|globals?\.s?css$|variables\.s?[ac]ss$", re.I)
+HEAVY_RASTER, HEAVY_SVG = 300 * 1024, 100 * 1024
+ICON_PX = 96  # a raster this small under an icons folder should be a vector
+
+PROTOTYPE = [  # name, files (ui = UI code only, src = any non-test source), pattern
+    ("lorem", "src", re.compile(r"lorem ipsum|dolor sit amet|consectetur adipiscing", re.I)),
+    ("coming_soon", "ui", re.compile(r"coming soon|sắp ra mắt|đang (?:được )?phát triển|tính năng (?:này )?(?:đang|sắp)|under construction"
+                                     r"|not (?:yet )?implemented|work in progress|chưa hỗ trợ|feature unavailable", re.I)),
+    ("fake_person", "ui", re.compile(r"John Doe|Jane Doe|Nguyễn Văn A\b|Trần Thị B\b|test@test\.|@example\.com|\b0123456789\b"
+                                     r"|123 Main St|Acme (?:Inc|Corp)", re.I)),
+    ("placeholder_image", "src", re.compile(r"picsum\.photos|placehold\.(?:co|it)|via\.placeholder\.com|placekitten|dummyimage\.com"
+                                            r"|loremflickr|source\.unsplash\.com|randomuser\.me|pravatar\.cc|ui-avatars\.com", re.I)),
+    ("mock_data", "src", re.compile(r"\b(?:mock|fake|dummy|sample|stub)(?:Data|Items|Users|List|Products|Orders|Response|Json|Posts)\b"
+                                    r"|from\s+['\"][^'\"]*/(?:mocks?|fixtures|fake[-_]?data)/|['\"][^'\"]*/(?:mocks?|fake[-_]?data)/[^'\"]*\.dart['\"]"
+                                    r"|\b(?:faker|@faker-js)\b")),
+    ("todo_text", "ui", re.compile(r"[\"'`>][^\"'`<>\n]{0,60}\b(?:TODO|TBD|FIXME|XXX)\b[^\"'`<>\n]{0,60}[\"'`<]")),
+    ("dead_handler", "ui", re.compile(r"\bon(?:Press|Click|Tap|Pressed|LongPress|Submit|Changed?)\s*[=:]\s*\{?\s*\(\s*\w*\s*\)\s*(?:=>\s*)?\{\s*\}"
+                                      r"|\bon(?:Click|Tap)\s*=\s*\{\s*\}|\bhref=[\"']#[\"']|\bon\w+\s*[=:]\s*\{?\s*\(\s*\)\s*=>\s*(?:alert|console\.log)\("
+                                      r"|\bButton\([^)\n]*\)\s*\{\s*\}|\baction:\s*\{\s*\}")),
+    ("raw_error", "ui", re.compile(r"\{\s*(?:e|err|error)\??\.message\s*\}|Text\(\s*(?:e|err|error)\.toString\(\)"
+                                   r"|\b(?:toast|showToast|Alert\.alert|alert|showSnackBar|SnackBar|message\.error)\([^)\n]*\b(?:e|err|error)"
+                                   r"(?:\.message|\.toString\(\))|Text\(\s*['\"][^'\"\n]*\$\{?(?:e|err|error)\b")),
+    ("flag_hardcoded", "src", re.compile(r"\b(?:const|let|var|final|static|val)\s+(?:bool\s+)?\w*(?i:enable|feature|flag|show_|use_?mock|mock|bypass|"
+                                         r"skip_|is_?demo|demo_?mode)\w*\s*[:=]\s*(?:true|false)\b")),
+]
+DESIGN = [  # name, pattern (outside token files, in UI code and style sheets)
+    ("hex", re.compile(r"(?<=[\s'\"`:(,=])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|(?![0-9]{3}\b)[0-9a-fA-F]{3})(?![\w-])")),
+    ("rgb", re.compile(r"\b(?:rgba?|hsla?)\(\s*\d")),
+    ("color_literal", re.compile(r"\bColor\(\s*0x[0-9A-Fa-f]{6,8}\s*\)|\bColor\.fromA?RGBO?\(|\bUIColor\(red:|\bColor\(red:|#colorLiteral")),
+    ("default_palette", re.compile(r"\bColors\.(?:red|pink|purple|deepPurple|indigo|blue|lightBlue|cyan|teal|green|lightGreen|lime|yellow"
+                                   r"|amber|orange|deepOrange|brown|grey|blueGrey)(?:Accent)?\b|\bColor\.(?:Red|Blue|Green|Yellow|Cyan|Magenta|Gray)\b"
+                                   r"|\bColor\.(?:red|blue|green|orange|yellow|pink|purple)\b|\bcolor:\s*['\"]?(?:red|blue|green|orange|purple|yellow|pink)\b")),
+    ("arbitrary_value", re.compile(r"\b(?:bg|text|border|from|to|via|fill|stroke|ring|outline|shadow|divide|accent|caret)-\[(?:#|rgb|hsl)"
+                                   r"|\b(?:text|p[xytrbl]?|m[xytrbl]?|gap|space-[xy]|w|h|min-[wh]|max-[wh]|rounded(?:-\w+)?|top|left|right|bottom"
+                                   r"|leading|tracking)-\[\d+(?:\.\d+)?(?:px|rem|em)?\]")),
+    ("font_family", re.compile(r"\bfontFamily\s*[:=]\s*['\"]|(?<![\w-])font-family:(?!\s*(?:var\(|inherit))|\.font\(\.custom\(")),
+]
+FONT_SIZE = re.compile(r"\bfontSize\s*[:=]\s*(\d+(?:\.\d+)?)|(?<![\w-])font-size:\s*(\d+(?:\.\d+)?)(?:px|pt)|\.system\(size:\s*(\d+(?:\.\d+)?)")
+RADIUS = re.compile(r"\bborderRadius\s*[:=]\s*(\d+(?:\.\d+)?)|BorderRadius\.circular\((\d+(?:\.\d+)?)\)|(?<![\w-])border-radius:\s*(\d+)px"
+                    r"|RoundedCornerShape\((\d+)\.dp\)|cornerRadius\((?:radius:\s*)?(\d+)")
+SPACING = re.compile(r"\b(?:padding|margin|gap)(?:Top|Bottom|Left|Right|Horizontal|Vertical|Start|End)?\s*[:=]\s*(\d+)(?![\d.%])"
+                     r"|(?<![\w-])(?:padding|margin|gap)(?:-[a-z]+)?:\s*(\d+)px|EdgeInsets\.(?:all|symmetric|only|fromLTRB)\(([^)]{0,80})\)")
+EMOJI = re.compile("[\U0001F300-\U0001FAFF\U0001F000-\U0001F2FF☀-➿⭐⭕⌚-⏿]")
+ICON_IMPORT = re.compile(r"import\s+(?:\{([^}]*)\}|(\w+))?[^;'\"]*?from\s+['\"]([^'\"]+)['\"]")
+JS_ICON_LIBS = [(re.compile(r"^lucide-react(?:-native)?$"), "lucide"), (re.compile(r"^react-icons/(\w+)"), "react-icons/{0}"),
+                (re.compile(r"^@heroicons/"), "heroicons"), (re.compile(r"^@fortawesome/"), "fontawesome"),
+                (re.compile(r"^@mui/icons-material"), "material-icons"), (re.compile(r"^@ant-design/icons"), "ant-icons"),
+                (re.compile(r"^@tabler/icons"), "tabler"), (re.compile(r"^(?:phosphor-react|@phosphor-icons/)"), "phosphor"),
+                (re.compile(r"^react-feather$"), "feather"), (re.compile(r"^@radix-ui/react-icons$"), "radix-icons"),
+                (re.compile(r"^@iconify/"), "iconify"), (re.compile(r"^react-native-vector-icons/(\w+)"), "vector-icons/{0}"),
+                (re.compile(r"^@expo/vector-icons(?:/(\w+))?$"), "vector-icons/{0}"), (re.compile(r"^ionicons"), "ionicons")]
+CODE_ICONS = [("dart", re.compile(r"\bIcons\.\w"), "material"), ("dart", re.compile(r"\bCupertinoIcons\."), "cupertino"),
+              ("dart", re.compile(r"\bFontAwesomeIcons\."), "fontawesome"), ("dart", re.compile(r"\bLucideIcons\."), "lucide"),
+              ("dart", re.compile(r"\bPhosphorIcons\."), "phosphor"), ("dart", re.compile(r"\bIconsax\."), "iconsax"),
+              ("kotlin", re.compile(r"\bIcons\.(?:Filled|Default)\."), "material-filled"),
+              ("kotlin", re.compile(r"\bIcons\.(?:Outlined|Rounded|Sharp|TwoTone)\."), "material-outlined"),
+              ("swift", re.compile(r"\bImage\(systemName:|UIImage\(systemName:"), "sf-symbols")]
+FETCH = re.compile(r"\buse(?:Query|SWR|InfiniteQuery|SuspenseQuery|Fetch|AsyncData)\(|\bfetch\(|\baxios\b|\bFutureBuilder\b|\bStreamBuilder\b"
+                   r"|ref\.watch\(\w+Provider|\bBlocBuilder\b|\bLaunchedEffect\b|collectAsState|\.task\s*\{|\bsupabase\.from\(|\bapi\.\w+\(")
+LOADING = re.compile(r"loading|isFetching|isPending|pending|skeleton|shimmer|spinner|ActivityIndicator|ProgressIndicator|ProgressView|"
+                     r"CircularProgress|LinearProgress|\.when\(|Suspense", re.I)
+LISTING = re.compile(r"\.map\(|ListView|FlatList|SectionList|LazyColumn|LazyVerticalGrid|ForEach|GridView|<table|\bList\s*\{|v-for=|\{#each")
+EMPTY = re.compile(r"isEmpty|\.length\s*===?\s*0|!\s*\w+(?:\?\.)?\.length\b|empty|ListEmptyComponent|no (?:data|results|items)|chưa có|"
+                   r"không có|nothing", re.I)
+FAILED = re.compile(r"isError|error|catch|onError|hasError|ErrorBoundary|retry|thử lại|failure", re.I)
+TRACK_CALL = re.compile(r"\b(?:logEvent|trackEvent|logScreenView|setCurrentScreen)\(|\b(?:analytics|posthog|mixpanel|amplitude|segment)\.\w+\("
+                        r"|\b(?:track|capture)\(\s*['\"]")
+AUTO_TRACK = re.compile(r"FirebaseAnalyticsObserver|AnalyticsObserver|trackScreenViews|autocapture|capture_pageview|<Analytics\s*/>"
+                        r"|GoogleAnalytics\b|logScreenView\(")  # one observer tracks every screen
+TRACK_SDK = [("firebase-analytics", r"firebase[_-]analytics|@react-native-firebase/analytics|firebase/analytics"),
+             ("posthog", r"posthog"), ("mixpanel", r"mixpanel"), ("amplitude", r"amplitude"), ("segment", r"@segment/|segment_analytics"),
+             ("google-analytics", r"react-ga|gtag|googletagmanager|@next/third-parties"), ("vercel-analytics", r"@vercel/analytics"),
+             ("plausible", r"plausible"), ("umami", r"umami"), ("appsflyer", r"appsflyer"), ("adjust", r"\badjust[_-]?sdk|react-native-adjust")]
+CRASH_SDK = [("sentry", r"sentry"), ("crashlytics", r"crashlytics"), ("bugsnag", r"bugsnag"), ("datadog", r"datadog"),
+             ("newrelic", r"newrelic|new-relic"), ("rollbar", r"rollbar"), ("instabug", r"instabug")]
+L10N_FILE = re.compile(r"\.arb$|(^|/)(locales?|i18n|lang|translations|messages)/[^/]+\.(json|ya?ml|ts|js)$|(^|/)values-[a-z]{2}[^/]*/strings\.xml$"
+                       r"|\.lproj/|Localizable\.(strings|xcstrings)$")
+UI_TEXT = [  # (languages or extensions, pattern with group 1 = a literal a person reads)
+    (UI_EXT, re.compile(r"(?<![=\-])>\s*([^<>{}\n]*?[A-Za-zÀ-ỹ]{2,}[^<>{}\n]*?)\s*<")),
+    (UI_EXT, re.compile(r"\b(?:title|placeholder|label|alt|aria-label|accessibilityLabel|subtitle|buttonText|helperText|emptyText)="
+                        r"[\"']([^\"'{}\n]*[A-Za-zÀ-ỹ]{2,}[^\"'{}\n]*)[\"']")),
+    (("dart",), re.compile(r"\bText\(\s*['\"]([^'\"$\n]{2,})['\"]|\b(?:labelText|hintText|helperText|title|tooltip|semanticLabel|label):"
+                           r"\s*(?:const\s+Text\(\s*)?['\"]([^'\"$\n]{2,})['\"]")),
+    (("kotlin",), re.compile(r"\bText\(\s*(?:text\s*=\s*)?\"([^\"$\n]{2,})\"")),
+    (("swift",), re.compile(r"\.text\s*=\s*\"([^\"\n]{2,})\"|setTitle\(\"([^\"\n]{2,})\"")),
+]
+CODE_TEXT = re.compile(r"=>|&&|\||==|;|\(|\)|^\s*[\w.]+\s*$|\b(?:void|Promise|string|number|boolean|null|undefined)\b"
+                       r"|^[^a-zà-ỹ]*$|^(?:https?:|/)\S*$")  # `a > b && c < d`, a type, a lone identifier, a format like FX-XXXX: code, not copy
+VI_CHARS = re.compile(r"[ăâđêôơưàáạảãằắặẳẵầấậẩẫèéẹẻẽềếệểễìíịỉĩòóọỏõồốộổỗờớợởỡùúụủũừứựửữỳýỵỷỹ]", re.I)
+EN_WORDS = {"the", "your", "you", "to", "and", "of", "for", "is", "not", "no", "please", "error", "failed", "success", "save", "cancel",
+            "loading", "submit", "login", "sign", "welcome", "back", "next", "continue", "delete", "edit", "add", "search", "settings",
+            "profile", "home", "view", "all", "more", "done", "try", "again", "something", "went", "wrong", "are", "sure", "confirm"}
+DEFAULT_TITLE = re.compile(r"Create Next App|Generated by create next app|Vite \+ (?:React|Vue|TS|Svelte|Preact)|<title>React App</title>"
+                           r"|Welcome to (?:Expo|React|Next\.js|Flutter|Nuxt)|Flutter Demo|create-expo-app|Edit src/App\.\w+|Get started by editing"
+                           r"|flutter_application_\d|<application\b[^>]*?android:label=\"[a-z0-9]+_[a-z0-9_]+\"")
+TEMPLATE_LEFTOVERS = {"public/vite.svg", "src/assets/react.svg", "public/next.svg", "public/vercel.svg", "public/file.svg", "public/globe.svg",
+                      "public/window.svg", "src/logo.svg", "public/logo192.png", "public/logo512.png", "assets/images/react-logo.png",
+                      "assets/images/partial-react-logo.png", "src/assets/vue.svg", "static/svelte-welcome.png"}
+DARK_MODE = re.compile(r"prefers-color-scheme|useColorScheme|darkTheme|ThemeMode\.dark|Appearance\.|isSystemInDarkTheme|\bdark:[a-z]|"
+                       r"colorScheme\s*[:=]\s*['\"]dark|\.preferredColorScheme|next-themes|useTheme\(")
+ANDROID_RES = re.compile(r"(?:^|/)res/(drawable|mipmap)(?:-([a-z0-9-]+))?/([^/]+)\.(png|jpe?g|webp|xml)$")
+DENSITIES = ("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi")
+AT_SCALE = re.compile(r"^(.*?)@([23])x$")
+FLUTTER_SCALE = re.compile(r"(^|/)([23])\.0x/")
+ASSET_REF = re.compile(r"require\(\s*['\"]([^'\"]+\.(?:png|jpe?g|webp|gif|svg))['\"]\s*\)|from\s+['\"]([^'\"]+\.(?:png|jpe?g|webp|gif|svg))['\"]"
+                       r"|\b(?:Image\.asset|AssetImage|SvgPicture\.asset|Lottie\.asset)\(\s*['\"]([^'\"$]+)['\"]"
+                       r"|\bsrc=[\"'](/[^\"'?#$]+\.(?:png|jpe?g|webp|gif|svg))[\"']")
+IMPORT_SPEC = re.compile(r"(?:from|import|require\()\s*['\"]((?:\.{1,2}|@|~)/[^'\"]+|package:[^'\"]+\.dart|[\w/]+\.dart)['\"]")
+SIGNALS = ("lorem", "coming_soon", "fake_person", "placeholder_image", "mock_data", "todo_text", "dead_handler", "raw_error",
+           "flag_hardcoded", "hex", "rgb", "color_literal", "default_palette", "arbitrary_value", "font_family", "off_grid", "emoji",
+           "hardcoded_text", "no_loading", "no_empty", "no_error")
+
+
+def image_size(path):
+    """(width, height) of a PNG, GIF, WebP or JPEG from its header; None for anything else."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(64 * 1024)
+    except OSError:
+        return None
+    try:
+        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            return struct.unpack(">II", head[16:24])
+        if head[:6] in (b"GIF87a", b"GIF89a"):
+            return struct.unpack("<HH", head[6:10])
+        if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+            chunk = head[12:16]
+            if chunk == b"VP8X":
+                return 1 + int.from_bytes(head[24:27], "little"), 1 + int.from_bytes(head[27:30], "little")
+            if chunk == b"VP8 ":
+                w, h = struct.unpack("<HH", head[26:30])
+                return w & 0x3FFF, h & 0x3FFF
+            if chunk == b"VP8L":
+                bits = int.from_bytes(head[21:25], "little")
+                return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+        if head[:2] == b"\xff\xd8":
+            i = 2
+            while i + 9 < len(head):
+                if head[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = head[i + 1]
+                if marker in (0xD8, 0x01, 0xFF) or 0xD0 <= marker <= 0xD7:
+                    i += 1 if marker == 0xFF else 2
+                    continue
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    h, w = struct.unpack(">HH", head[i + 5:i + 9])
+                    return w, h
+                i += 2 + struct.unpack(">H", head[i + 2:i + 4])[0]
+    except struct.error:
+        return None
+    return None
+
+
+def in_comment(text, pos):
+    start = text.rfind("\n", 0, pos) + 1
+    stripped = text[start:pos].lstrip()
+    return stripped.startswith(("//", "/*", "*", "<!--", "{/*"))
+
+
+def ui_file(rel, lang, text):
+    ext = os.path.splitext(rel)[1].lower()
+    if ext in UI_EXT:
+        return True
+    if lang == "dart":
+        return bool(re.search(r"\bWidget\s+build\(|extends\s+(?:StatelessWidget|StatefulWidget|State<|ConsumerWidget|HookWidget)", text))
+    if lang == "kotlin":
+        return "@Composable" in text or "setContentView" in text
+    if lang == "swift":
+        return bool(re.search(r":\s*View\s*\{|some View|UIViewController|: UIView\b", text))
+    if lang in JS_LIKE:
+        in_ui = bool(set(rel.lower().split("/")[:-1]) & UI)
+        return in_ui and bool(re.search(r"<[A-Z]\w*|StyleSheet\.create|createElement", text))
+    return False
+
+
+class Signals:
+    """Hits of named patterns: count, files, first places; per file for the areas."""
+
+    def __init__(self):
+        self.data, self.per_file = {}, collections.defaultdict(collections.Counter)
+        self.first, self.seen = collections.defaultdict(dict), set()
+
+    def add(self, name, rel, text=None, pos=0, line=None):
+        line = line if line is not None else (line_of(text, pos) if text is not None else 0)
+        if (name, rel, line) in self.seen:  # one hit a line: `Lorem ipsum dolor sit amet` is one placeholder
+            return
+        self.seen.add((name, rel, line))
+        entry = self.data.setdefault(name, {"count": 0, "files": collections.Counter(), "at": []})
+        entry["count"] += 1
+        entry["files"][rel] += 1
+        where = "%s:%d" % (rel, line) if line else rel
+        if len(entry["at"]) < 5:
+            entry["at"].append(where)
+        self.per_file[rel][name] += 1
+        self.first[rel].setdefault(name, where)
+
+    def report(self, names, n):
+        return {k: {"count": self.data[k]["count"], "files": len(self.data[k]["files"]), "top": top(self.data[k]["files"], min(n, 5)),
+                    "at": self.data[k]["at"]} for k in names if k in self.data}
+
+
+def nearest(rel, marker, dirs):
+    """Folder of the closest ancestor of `rel` that holds `marker` (a file or folder name), '' = repo root, None = none."""
+    parts = rel.split("/")[:-1]
+    for i in range(len(parts), -1, -1):
+        base = "/".join(parts[:i])
+        if ((base + "/") if base else "") + marker in dirs:
+            return base
+    return None
+
+
+def ancestors(listing):
+    """Every tracked file and every folder above one: what `nearest` probes."""
+    out = set(listing)
+    for rel in listing:
+        parts = rel.split("/")
+        for i in range(1, len(parts)):
+            out.add("/".join(parts[:i]))
+    return out
+
+
+def resolve_import(rel, spec, known):
+    if spec.startswith(("@/", "~/")):
+        parts = rel.split("/")
+        base = "/".join(parts[:parts.index("src") + 1]) if "src" in parts else os.path.dirname(rel)
+        cand = base + "/" + spec[2:]
+    elif spec.startswith("package:"):
+        parts = rel.split("/")
+        base = "/".join(parts[:parts.index("lib") + 1]) if "lib" in parts else ""
+        cand = base + "/" + (spec.split("/", 1)[1] if "/" in spec else "")
+    else:
+        cand = os.path.normpath(os.path.join(os.path.dirname(rel), spec)).replace("\\", "/")
+    for suffix in ("", ".tsx", ".ts", ".jsx", ".js", ".vue", ".svelte", "/index.tsx", "/index.ts", "/index.jsx", "/index.js"):
+        if cand + suffix in known:
+            return cand + suffix
+    return None
+
+
+def asset_names(rel):
+    """Names code would use for an asset: stem without @2x, an imageset's name, flutter_gen's camelCase."""
+    stem = os.path.splitext(os.path.basename(rel))[0]
+    m = AT_SCALE.match(stem)
+    stem = m.group(1) if m else stem
+    imageset = re.search(r"([^/]+)\.imageset/", rel)
+    names = {imageset.group(1)} if imageset else {stem}
+    for name in list(names):
+        camel = re.sub(r"[-_ ]+(\w)", lambda c: c.group(1).upper(), name)
+        names.add(camel)
+    return names
+
+
+IDENTITY_PATH = re.compile(r"(^|/)(mipmap-[^/]+|AppIcon[^/]*\.appiconset|LaunchImage[^/]*|Splash[^/]*|splash[^/]*|launch[^/]*)/"
+                           r"|(^|/)(favicon|apple-touch-icon|apple-icon|icon-\d+|Icon-\d+|logo\d+|opengraph-image|og-image|twitter-image|"
+                           r"android-chrome-[^/]*|mstile-[^/]*|icon|adaptive-icon|splash(?:-icon)?)\.\w+$|(^|/)fonts?/", re.I)
+
+
+def asset_exists(root, known, cand):
+    """React Native resolves `a.png` to `a@2x.png` and `a@3x.png` too."""
+    stem, ext = os.path.splitext(cand)
+    variants = (cand, stem + "@2x" + ext, stem + "@3x" + ext)
+    return any(v in known or os.path.exists(os.path.join(root, v)) for v in variants)
+
+
+def assets_report(root, listing, blob, sources, n):
+    images = [p for p in listing if p.lower().endswith(IMAGE_EXT) and not TESTS.search(p)]
+    known = set(listing)
+    dirs = ancestors(listing)
+    out = {"images": len(images), "raster": 0, "svg": 0, "bytes": 0}
+    heavy, icons = [], []
+    for rel in images:
+        path = os.path.join(root, rel)
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        out["bytes"] += size
+        if rel.lower().endswith(".svg"):
+            out["svg"] += 1
+            if size > HEAVY_SVG:
+                heavy.append({"path": rel, "kb": size // 1024})
+            continue
+        out["raster"] += 1
+        dims = image_size(path)
+        if size > HEAVY_RASTER:
+            heavy.append({"path": rel, "kb": size // 1024, "px": "%dx%d" % dims if dims else None})
+        low = rel.lower()
+        iconish = re.search(r"(^|/)(icons?|ic)(/|_)|/ic_[^/]+$", low) and not IDENTITY_PATH.search(rel)
+        if iconish and dims and max(dims) <= ICON_PX:
+            icons.append(rel)
+    out["heavy"] = sorted(heavy, key=lambda h: -h["kb"])[:n]
+    out["raster_icons"] = {"count": len(icons), "at": icons[:5]}
+    gaps = []
+    groups = collections.defaultdict(set)  # (dir, stem, ext) → @1x/@2x/@3x seen
+    flutter = collections.defaultdict(set)
+    android = collections.defaultdict(set)
+    android_used = collections.defaultdict(set)
+    for rel in images + [p for p in listing if ANDROID_RES.search(p)]:
+        res = ANDROID_RES.search(rel)
+        if res:
+            kind, quals, name = res.group(1), (res.group(2) or "").split("-"), res.group(3)
+            dens = [q for q in quals if q in DENSITIES]
+            if dens and res.group(4) != "xml":
+                night = "night" in quals
+                android[(rel.split("/res/")[0], kind, night, name)].add(dens[0])
+                android_used[(rel.split("/res/")[0], kind)].add(dens[0])
+            continue
+        if rel.lower().endswith(".svg") or ".imageset/" in rel or ".appiconset/" in rel:
+            continue
+        stem, ext = os.path.splitext(os.path.basename(rel))
+        fm = FLUTTER_SCALE.search(rel)
+        if fm:
+            flutter[(FLUTTER_SCALE.sub(r"\1", rel))].add(fm.group(2))
+            continue
+        m = AT_SCALE.match(stem)
+        groups[(os.path.dirname(rel), m.group(1) if m else stem, ext)].add(m.group(2) if m else "1")
+        flutter.setdefault(rel, set())
+    for (folder, stem, ext), scales in sorted(groups.items()):
+        if scales & {"2", "3"} and not {"2", "3"} <= scales:
+            gaps.append({"asset": "%s/%s%s" % (folder, stem, ext) if folder else stem + ext, "has": sorted("@%sx" % s for s in scales),
+                         "missing": sorted("@%sx" % s for s in {"2", "3"} - scales)})
+    flutter_dirs = {os.path.dirname(k) for k, v in flutter.items() if v}
+    for rel, scales in sorted(flutter.items()):
+        if (scales and not {"2", "3"} <= scales) or (not scales and os.path.dirname(rel) in flutter_dirs):
+            gaps.append({"asset": rel, "has": sorted("%s.0x" % s for s in scales) or ["1.0x"],
+                         "missing": sorted("%s.0x" % s for s in {"2", "3"} - scales)})
+    for (base, kind, night, name), dens in sorted(android.items()):
+        want = DENSITIES if kind == "mipmap" else android_used[(base, kind)]
+        missing = [d for d in DENSITIES if d in want and d not in dens]
+        if missing:
+            gaps.append({"asset": "%s/res/%s%s/%s" % (base, kind, "-night" if night else "", name), "has": sorted(dens, key=DENSITIES.index),
+                         "missing": missing})
+    for rel in listing:
+        if rel.endswith(".imageset/Contents.json"):
+            try:
+                spec = json.loads(read_text(root, rel) or "{}")
+            except ValueError:
+                continue
+            entries = [e for e in spec.get("images", []) if isinstance(e, dict)]
+            files = [e for e in entries if e.get("filename")]
+            vector = any(str(e.get("filename", "")).lower().endswith((".pdf", ".svg")) for e in files)
+            missing = sorted({e.get("scale") for e in entries if e.get("scale") in ("2x", "3x") and not e.get("filename")})
+            if not files:
+                gaps.append({"asset": os.path.dirname(rel), "has": [], "missing": ["mọi ảnh"]})
+            elif missing and not vector:
+                gaps.append({"asset": os.path.dirname(rel), "has": sorted(e.get("scale", "?") for e in files), "missing": missing})
+    out["density_gaps"] = {"count": len(gaps), "top": gaps[:n]}
+    unused = []
+    for rel in images:
+        if IDENTITY_PATH.search(rel) or rel.rsplit("/", 1)[-1] in ("Contents.json",):
+            continue
+        if not any(name and name in blob for name in asset_names(rel)):
+            unused.append(rel)
+    out["unused"] = {"count": len(unused), "top": unused[:n]}
+    missing = []
+    for rel, text in sources:
+        for m in ASSET_REF.finditer(text):
+            spec = next(g for g in m.groups() if g)
+            if spec.startswith(("http:", "https:", "data:")):
+                continue
+            if spec.startswith("."):
+                cands = [os.path.normpath(os.path.join(os.path.dirname(rel), spec)).replace("\\", "/")]
+            elif spec.startswith("/"):
+                base = nearest(rel, "public", dirs)
+                cands = [((base + "/") if base else "") + "public" + spec] if base is not None else [spec.lstrip("/")]
+            elif spec.startswith(("@/", "~/")):
+                parts = rel.split("/")
+                cands = ["/".join(parts[:parts.index("src") + 1]) + "/" + spec[2:]] if "src" in parts else [spec[2:]]
+            else:
+                base = nearest(rel, "pubspec.yaml", dirs)
+                cands = [((base + "/") if base else "") + spec]
+            if not any(asset_exists(root, known, cand) for cand in cands):
+                missing.append({"ref": spec, "at": "%s:%d" % (rel, line_of(text, m.start()))})
+    out["missing"] = missing[:n]
+    return out
+
+
+def identity_report(root, listing, blob):
+    known = set(listing)
+    out = {}
+
+    def has(rx):
+        return [p for p in listing if re.search(rx, p)]
+
+    if has(r"\.xcodeproj/|AppIcon[^/]*\.appiconset/"):
+        missing = []
+        icon = has(r"AppIcon[^/]*\.appiconset/Contents\.json$")
+        if not icon:
+            missing.append("AppIcon.appiconset")
+        else:
+            try:
+                spec = json.loads(read_text(root, icon[0]) or "{}")
+            except ValueError:
+                spec = {}
+            entries = [e for e in spec.get("images", []) if isinstance(e, dict)]
+            if not any(e.get("filename") and str(e.get("size", "")).startswith("1024") for e in entries):
+                missing.append("app icon 1024×1024 (App Store)")
+            empty = [e for e in entries if not e.get("filename")]
+            if empty and len(entries) > 1 and len(empty) < len(entries):
+                missing.append("app icon thiếu %d/%d cỡ" % (len(empty), len(entries)))
+        plists = " ".join(read_text(root, p) or "" for p in has(r"(^|/)Info\.plist$")[:4])
+        if not has(r"LaunchScreen\.storyboard$") and "UILaunchScreen" not in plists and "UILaunchStoryboardName" not in plists:
+            missing.append("launch screen")
+        out["ios"] = {"missing": missing}
+    manifests = has(r"(^|/)src/main/AndroidManifest\.xml$")
+    if manifests:
+        missing = []
+        base = manifests[0].split("/src/main/")[0]
+        launcher = {re.search(r"mipmap-(\w+)/", p).group(1) for p in has(r"%s/src/main/res/mipmap-\w+/ic_launcher[^/]*\.(png|webp)$" % re.escape(base))}
+        lacking = [d for d in DENSITIES if d not in launcher]
+        if lacking:
+            missing.append("ic_launcher %s" % ", ".join(lacking))
+        if not has(r"res/mipmap-anydpi-v26/ic_launcher\.xml$"):
+            missing.append("adaptive icon (mipmap-anydpi-v26)")
+        styles = " ".join(read_text(root, p) or "" for p in has(r"%s/src/main/res/values[^/]*/(styles|themes)\.xml$" % re.escape(base)))
+        background = " ".join(re.sub(r"<!--.*?-->", "", read_text(root, p) or "", flags=re.S) for p in has(r"launch_background\.xml$"))
+        if "windowSplashScreen" not in styles and "<bitmap" not in background and not has(r"res/drawable[^/]*/splash"):
+            missing.append("splash (windowSplashScreen hoặc launch_background có ảnh)")
+        out["android"] = {"missing": missing}
+    for rel in has(r"(^|/)app\.json$"):
+        try:
+            expo = (json.loads(read_text(root, rel) or "{}") or {}).get("expo")
+        except ValueError:
+            continue
+        if not isinstance(expo, dict):
+            continue
+        base = os.path.dirname(rel)
+        missing = []
+        plugins = json.dumps(expo.get("plugins") or [])
+        checks = [("icon", expo.get("icon")), ("splash", (expo.get("splash") or {}).get("image") or ("expo-splash-screen" in plugins and "x")),
+                  ("android.adaptiveIcon", ((expo.get("android") or {}).get("adaptiveIcon") or {}).get("foregroundImage")),
+                  ("web.favicon", (expo.get("web") or {}).get("favicon"))]
+        for key, value in checks:
+            if not value:
+                missing.append(key)
+            elif value != "x" and os.path.normpath(os.path.join(base, value)).replace("\\", "/") not in known:
+                missing.append("%s (%s không có)" % (key, value))
+        out["expo"] = {"missing": missing}
+        break
+    packages = " ".join(read_text(root, p) or "" for p in has(r"(^|/)package\.json$")[:6])
+    if re.search(r"\"(next|vite|react-scripts|nuxt|@sveltejs/kit|@angular/core|astro)\"", packages):
+        missing = []
+        if not has(r"(^|/)(public|static|app|src/app)/(favicon\.(ico|png|svg)|icon\.(png|svg|ico|tsx?|jsx?))$") \
+                and not re.search(r"rel=[\"'](?:shortcut )?icon[\"']", blob):
+            missing.append("favicon")
+        if not has(r"(^|/)(apple-touch-icon[^/]*\.png|apple-icon\.(png|tsx?|jsx?))$") and "apple-touch-icon" not in blob:
+            missing.append("apple-touch-icon")
+        if not has(r"(^|/)(manifest\.json|site\.webmanifest|manifest\.webmanifest|manifest\.(ts|js))$"):
+            missing.append("web manifest (icon 192/512)")
+        if not has(r"(^|/)(opengraph-image|og-image|og)\.\w+$") and "og:image" not in blob and "openGraph" not in blob:
+            missing.append("ảnh chia sẻ (og:image)")
+        out["web"] = {"missing": missing}
+    out["template_leftovers"] = [{"path": rel, "used": os.path.basename(rel) in blob} for rel in listing
+                                 if any(rel == t or rel.endswith("/" + t) for t in TEMPLATE_LEFTOVERS)]
+    return out
+
+
+def font_families(root, listing, sources, styles, blob):
+    """Brand fonts the product declares: next/font, @font-face, pubspec fonts, Google Fonts links, google_fonts."""
+    found = set()
+    for _, text in sources:
+        for m in re.finditer(r"import\s*\{([^}]+)\}\s*from\s*['\"]next/font/google['\"]", text):
+            found.update(f.strip().split(" as ")[0] for f in m.group(1).split(",") if f.strip())
+    sheets = " ".join(t for _, t in styles)
+    found.update(re.findall(r"@font-face\s*\{[^}]*?font-family:\s*['\"]?([A-Za-z][\w -]+?)['\"]?\s*;", sheets))
+    pubspecs = " ".join(read_text(root, p) or "" for p in listing if p.endswith("pubspec.yaml"))
+    found.update(f.strip() for f in re.findall(r"-\s*family:\s*([\w -]+)", pubspecs))
+    found.update(f.replace("+", " ") for f in re.findall(r"fonts\.googleapis\.com/css2?\?family=([A-Za-z+]+)", blob))
+    found.update(re.findall(r"\bGoogleFonts\.(\w+)\(", blob))
+    return sorted(found)
+
+
+def cmd_ready(a):
+    root, cfg = context()
+    paths = scope(cfg, a.paths)
+    listing = tracked(root, paths, cfg)
+    code = Code(root, paths, cfg)
+    sig = Signals()
+    ui, sources = {}, []
+    for rel, lang, text in code.source():
+        sources.append((rel, text))
+        if ui_file(rel, lang, text):
+            ui[rel] = (lang, text)
+    styles = [(rel, read_text(root, rel) or "") for rel in listing if rel.lower().endswith(STYLE_EXT)]
+    blob_parts = []
+    for rel in listing:
+        ext = os.path.splitext(rel)[1].lower()
+        if ext in TEXT_EXT and not rel.endswith(("pubspec.yaml", "Contents.json")) and rel not in code.files:
+            blob_parts.append(read_text(root, rel) or "")
+    blob = "\n".join(blob_parts + [text for _, text, _ in code.files.values()])
+    for name, where, pattern in PROTOTYPE:
+        pool = ui.items() if where == "ui" else ((r, (None, t)) for r, t in sources)
+        for rel, (_, text) in pool:
+            for m in pattern.finditer(text):
+                if name not in ("lorem", "placeholder_image") and in_comment(text, m.start()):
+                    continue
+                sig.add(name, rel, text, m.start())
+    for rel in listing:
+        if rel.lower().endswith((".html", ".xml", ".plist", ".json")) and not GENERATED.search(rel) and not TESTS.search(rel):
+            text = read_text(root, rel) or ""
+            for m in DEFAULT_TITLE.finditer(text):
+                sig.add("default_title", rel, text, m.start())
+    for rel, text in sources:
+        for m in DEFAULT_TITLE.finditer(text):
+            sig.add("default_title", rel, text, m.start())
+    tokens = sorted({rel for rel in [r for r, _ in styles] + [r for r, _ in sources] if TOKEN_FILE.search(rel)})
+    font_sizes, radii = collections.Counter(), collections.Counter()
+    own_palette = re.search(r"\bclass\s+Colors\b", blob)  # the product's own `Colors` tokens, not Material's palette
+    for rel, text in list((r, t) for r, (_, t) in ui.items()) + styles:
+        if TOKEN_FILE.search(rel):
+            continue
+        for name, pattern in DESIGN:
+            if name == "default_palette" and own_palette:
+                continue
+            for m in pattern.finditer(text):
+                line_start = text.rfind("\n", 0, m.start()) + 1
+                if in_comment(text, m.start()) or re.match(r"\s*(--[\w-]+|\$[\w-]+)\s*:", text[line_start:m.start() + 1]):
+                    continue
+                sig.add(name, rel, text, m.start())
+        for m in FONT_SIZE.finditer(text):
+            font_sizes[next(g for g in m.groups() if g)] += 1
+        for m in RADIUS.finditer(text):
+            radii[next(g for g in m.groups() if g)] += 1
+        for m in SPACING.finditer(text):
+            values = re.findall(r"(?<![\w.])\d+(?:\.\d+)?", m.group(3)) if m.group(3) else [m.group(1) or m.group(2)]
+            if any(float(v) % 4 and float(v) not in (1, 2, 6) for v in values):
+                sig.add("off_grid", rel, text, m.start())
+        if rel.lower().endswith(STYLE_EXT):
+            continue
+        for m in EMOJI.finditer(text):
+            if not in_comment(text, m.start()):
+                sig.add("emoji", rel, text, m.start())
+    icon_sets = collections.defaultdict(set)
+    groups = collections.defaultdict(set)  # one UI = a scanned path × a language: Flutter and an iOS widget do not mix
+    for rel, (lang, text) in list(ui.items()) + [(r, (code.files[r][0], t)) for r, t in sources if r not in ui]:
+        before = {k: len(v) for k, v in icon_sets.items()}
+        for m in ICON_IMPORT.finditer(text):
+            names, default, module = m.group(1) or "", m.group(2), m.group(3)
+            for rx, label in JS_ICON_LIBS:
+                hit = rx.match(module)
+                if not hit:
+                    continue
+                if "{0}" in label and not (hit.groups() and hit.group(1)):
+                    families = [x.strip().split(" as ")[0] for x in names.split(",") if x.strip()] or [default or "?"]
+                    for fam in families:
+                        icon_sets[label.format(fam)].add(rel)
+                else:
+                    icon_sets[label.format(*(hit.groups() or ("",)))].add(rel)
+        for language, rx, label in CODE_ICONS:
+            if lang == language and rx.search(text):
+                icon_sets[label].add(rel)
+        owner = next((p for p in paths if p == "." or rel.startswith(p.rstrip("/") + "/")), ".")
+        family = "js" if lang in JS_LIKE else lang
+        groups[(owner, family)].update(k for k, v in icon_sets.items() if len(v) > before.get(k, 0))
+    if any(re.search(r"(^|/)icons?/[^/]+\.svg$", p) for p in listing):
+        icon_sets["svg riêng"].update(p for p in listing if re.search(r"(^|/)icons?/[^/]+\.svg$", p))
+    l10n = any(L10N_FILE.search(p) for p in listing)
+    vi, en, en_at = 0, 0, []
+    for rel, (lang, text) in ui.items():
+        ext = os.path.splitext(rel)[1].lower()
+        for scope_, pattern in UI_TEXT:
+            if ext not in scope_ and lang not in scope_:
+                continue
+            for m in pattern.finditer(text):
+                literal = next((g for g in m.groups() if g), "").strip()
+                if not literal or CODE_TEXT.search(literal) or in_comment(text, m.start()):
+                    continue
+                sig.add("hardcoded_text", rel, text, m.start())
+                words = re.findall(r"[A-Za-z]+", literal.lower())
+                if VI_CHARS.search(literal):
+                    vi += 1
+                elif len(words) >= 2 and set(words) & EN_WORDS:
+                    en += 1
+                    if len(en_at) < 5:
+                        en_at.append("%s:%d %s" % (rel, line_of(text, m.start()), literal[:40]))
+    screens = sorted({s["at"].rsplit(":", 1)[0] for s in (load_json(a.map).get("screens", []) if a.map else [])} & set(ui)) \
+        or sorted(r for r in ui if re.search(r"(^|/)(pages?|screens?|views?|routes?|app)/|(page|screen|view)\.\w+$", r, re.I))
+    known = set(code.files)
+    states = {"screens": len(screens), "no_loading": [], "no_empty": [], "no_error": []}
+    for rel in screens:
+        text = ui[rel][1]
+        joined = text + "".join(code.files[dep][1] for dep in {resolve_import(rel, s, known) for s in IMPORT_SPEC.findall(text)} - {None})
+        if not FETCH.search(joined):
+            continue
+        for key, rx, needs in (("no_loading", LOADING, None), ("no_empty", EMPTY, LISTING), ("no_error", FAILED, None)):
+            if (needs is None or needs.search(joined)) and not rx.search(joined):
+                states[key].append(rel)
+                sig.add(key, rel, line=None)
+    manifests = " ".join(read_text(root, p) or "" for p in listing if os.path.basename(p) in MANIFESTS)
+    auto = AUTO_TRACK.search(blob)
+    track_at = ["%s:%d" % (rel, line_of(text, m.start())) for rel, text in sources for m in TRACK_CALL.finditer(text)
+                if not in_comment(text, m.start())]
+    debug = SMELLS[[s[0] for s in SMELLS].index("debug_print")][2]
+    fonts = font_families(root, listing, sources, styles, blob)
+    font_files = [p for p in listing if p.lower().endswith(FONT_EXT)]
+    assets = assets_report(root, listing, blob, sources, a.top)
+    identity = identity_report(root, listing, blob)
+    leftovers = identity.pop("template_leftovers")
+    dark = bool(DARK_MODE.search(blob)) or any("/values-night" in p for p in listing)
+    by_area = []
+    if a.map:
+        for item in load_json(a.map).get("areas", []):
+            if item.get("kind") != "ui":
+                continue
+            files = [f for f in item.get("files", []) if f in code.files]
+            layer = list(files)
+            for _ in range(2):  # the route file → its screen → the screen's components
+                deps = sorted({resolve_import(f, s, known) for f in layer for s in IMPORT_SPEC.findall(code.files[f][1])} - {None} - set(files))
+                layer = deps[:15]
+                files += layer
+            counts, at = collections.Counter(), []
+            for f in files:
+                counts.update(sig.per_file.get(f, {}))
+                at += [w for k, w in sig.first.get(f, {}).items() if k in SIGNALS]
+            signals = {k: counts[k] for k in SIGNALS if counts[k]}
+            if signals:
+                by_area.append({"area": item["area"], "files": len(files), "signals": signals, "at": at[:6]})
+    emit({"root": root, "paths": paths,
+          "prototype": dict(sig.report(("lorem", "coming_soon", "fake_person", "placeholder_image", "mock_data", "todo_text", "dead_handler",
+                                        "raw_error", "flag_hardcoded", "default_title"), a.top),
+                            template_leftovers=leftovers),
+          "design_system": {"token_files": tokens[:12], "hardcoded": sig.report(("hex", "rgb", "color_literal", "default_palette",
+                                                                                 "arbitrary_value", "font_family", "off_grid"), a.top),
+                            "font_sizes": dict(font_sizes.most_common(12)), "radii": dict(radii.most_common(8)),
+                            "icon_sets": {k: len(v) for k, v in sorted(icon_sets.items(), key=lambda kv: -len(kv[1]))},
+                            "icon_mixed": {"%s (%s)" % key: sorted(sets) for key, sets in sorted(groups.items()) if len(sets) > 1}, "emoji": sig.report(("emoji",), a.top).get("emoji")},
+          "assets": dict(assets, dark_mode=dark),
+          "identity": identity,
+          "fonts": {"files": len(font_files), "families": fonts[:8], "custom": bool(fonts or font_files)},
+          "copy": {"l10n": l10n, "hardcoded_text": sig.report(("hardcoded_text",), a.top).get("hardcoded_text"),
+                   "mixed_lang": {"vi": vi, "en": en, "en_at": en_at} if vi and en else None},
+          "states": {k: (v[:a.top] if isinstance(v, list) else v) for k, v in states.items()},
+          "ops": {"tracking": [n for n, rx in TRACK_SDK if re.search(rx, manifests, re.I)],
+                  "crash_reporting": [n for n, rx in CRASH_SDK if re.search(rx, manifests, re.I)],
+                  "screen_tracking": auto.group(0) if auto else None,
+                  "track_calls": {"count": len(track_at), "files": len({w.rsplit(":", 1)[0] for w in track_at}), "at": track_at[:5]},
+                  "debug_print": sum(len(debug.findall(t)) for r, t in sources if r in ui)},
+          "areas": sorted(by_area, key=lambda x: -sum(x["signals"].values()))[:max(a.top * 3, 20)]})
+
+
 # ── coverage: plan + ledger ─────────────────────────────────────────────────
 
 COVER_HEAD = "Bản đồ phủ"
 HEALTH_HEAD = "Sức khoẻ"
 VERIFY_HEAD = "Xác minh sửa"
 LAST = "Lần cuối"
+LEVEL_HEAD = "Mức"  # readiness ux graded the last time the area was tested
+LEVELS = ("Prototype", "Beta", "Production")
 TESTED = ("✓", "✗", "⛔")  # pass · bug · denied as it must be; `·` not yet, `—` not for this role
 LAST_RX = re.compile(r"@([0-9a-f]{7,40})\s+(\d{4}-\d{2}-\d{2})")
 TICKET = re.compile(r"#(\d+)")
@@ -1188,13 +1851,15 @@ def coverage_of(text):
     header, rows = parse_table(section(text, COVER_HEAD))
     if not header:
         return {}, []
-    roles = [h for h in header[1:] if h != LAST]
+    roles = [h for h in header[1:] if h not in (LAST, LEVEL_HEAD)]
     out = {}
     for row in rows:
         row = row + [""] * (len(header) - len(row))
-        cells = {r: (row[i + 1] or "·") for i, r in enumerate(header[1:]) if r != LAST}
+        cells = {r: (row[i + 1] or "·") for i, r in enumerate(header[1:]) if r not in (LAST, LEVEL_HEAD)}
         last = LAST_RX.search(row[header.index(LAST)]) if LAST in header else None
-        out[row[0]] = {"cells": cells, "sha": last.group(1) if last else None, "date": last.group(2) if last else None}
+        level = row[header.index(LEVEL_HEAD)] if LEVEL_HEAD in header else ""
+        out[row[0]] = {"cells": cells, "sha": last.group(1) if last else None, "date": last.group(2) if last else None,
+                       "level": level if level in LEVELS else None}
     return out, roles
 
 
@@ -1255,7 +1920,8 @@ def cmd_plan(a):
     emit({"total": len(amap.get("areas", [])), "matched": len(rows), "covered_before": ever, "roles": roles,
           "missing_accounts": amap.get("missing_accounts", []), "env_files": amap.get("env_files", []),
           "selected": [{"area": name, "kind": item["kind"], "surface": item.get("surface"), "why": why, "files": item.get("files", [])[:3],
-                        "cells": {r: cells.get(r, "·") for r in roles}} for _, _, _, name, why, item, cells in pick],
+                        "cells": {r: cells.get(r, "·") for r in roles}, "level": (prev.get(name) or {}).get("level")}
+                       for _, _, _, name, why, item, cells in pick],
           "left": len(rows) - len(pick),
           "note": "FOCUS không khớp vùng nào" if focus and not rows else None})
 
@@ -1284,10 +1950,18 @@ def cmd_ledger(a):
     if unknown:  # a screen the map cannot see (no route): kept, but a typo of an area name would be a second row
         sys.stderr.write("vùng không có trong map (giữ thành dòng riêng): %s\n" % ", ".join(unknown))
     names += unknown
-    table, covered, roles_hit = [], 0, set()
+    index = load_json(a.index) if a.index else {}
+    graded = {g["area"]: g["level"] for g in index.get("ready", [])}
+    stray = sorted(n for n in graded if n not in run)
+    if stray:  # only an area tested this run gets a grade: the images ux judged are of this run
+        sys.stderr.write("mức của vùng không test lượt này (bỏ qua): %s\n" % ", ".join(stray))
+    table, covered, roles_hit, levels = [], 0, set(), collections.Counter()
     for name in names:
         old, new = prev.get(name), run.get(name)
         cells, last = {}, ""
+        level = (graded.get(name) if new else None) or (old or {}).get("level")
+        if level:
+            levels[level] += 1
         for r in roles:
             cell = (new or {}).get("cells", {}).get(r) or "·"
             if cell == "·" and old:
@@ -1300,27 +1974,37 @@ def cmd_ledger(a):
         hit = [r for r in roles if cells[r].startswith(TESTED)]
         covered += 1 if hit else 0
         roles_hit.update(hit)
-        table.append("| %s | %s | %s |" % (name, " | ".join(cells[r] for r in roles), last or "—"))
+        table.append("| %s | %s | %s | %s |" % (name, " | ".join(cells[r] for r in roles), level or "·", last or "—"))
     before = sum(1 for n in names if any(c.startswith(TESTED) for c in (prev.get(n) or {}).get("cells", {}).values()))
     verified = re.findall(r"#\d+\s*(✓|✗)", section(run_text, VERIFY_HEAD))
     ok, bad = verified.count("✓"), verified.count("✗")
-    index = load_json(a.index) if a.index else {}
     sev = index.get("by_sev", {})
     regressed = sum(1 for f in index.get("findings", []) if f.get("regressed"))
     total = len(names) or 1
     hist_head, hist_rows = parse_table(section(prev_text, HEALTH_HEAD))
-    row = "| %s | @%s | %d/%d (%d%%) | %d/%d | %d | %d | %d | %d | %s |" % (
-        date, sha7, covered, len(names), round(100.0 * covered / total), len(roles_hit), len(roles),
+    rated = sum(levels.values())
+    production = ("%d/%d" % (levels["Production"], rated)) if rated else "—"
+    row = "| %s | @%s | %d/%d (%d%%) | %d/%d | %s | %d | %d | %d | %d | %s |" % (
+        date, sha7, covered, len(names), round(100.0 * covered / total), len(roles_hit), len(roles), production,
         sev.get("cao", 0), sev.get("vừa", 0), sev.get("thấp", 0), regressed, ("%d/%d" % (ok, ok + bad)) if ok + bad else "—")
-    history = ["| " + " | ".join(r) + " |" for r in hist_rows if len(r) >= 9][-9:]
+    history = []
+    for r in hist_rows:
+        if len(r) == 9:  # a run before readiness was graded
+            r = r[:4] + ["—"] + r[4:]
+        if len(r) >= 10:
+            history.append("| " + " | ".join(r) + " |")
+    readiness = (" · mức %d Production · %d Beta · %d Prototype / %d vùng đã chấm" % (
+        levels["Production"], levels["Beta"], levels["Prototype"], rated)) if rated else ""
     out = ["## %s" % HEALTH_HEAD, "",
-           "Phủ vùng %d/%d → %d/%d · role đã test %d/%d (%s) · xác minh sửa %d ✓ %d ✗" % (
-               before, len(names), covered, len(names), len(roles_hit), len(roles), ", ".join(sorted(roles_hit)) or "—", ok, bad), "",
-           "| Ngày | @sha | Vùng đã phủ | Role | Cao | Vừa | Thấp | Tái phát | Xác minh sửa |",
-           "|---|---|---|---|---|---|---|---|---|"] + history + [row, "",
+           "Phủ vùng %d/%d → %d/%d · role đã test %d/%d (%s) · xác minh sửa %d ✓ %d ✗%s" % (
+               before, len(names), covered, len(names), len(roles_hit), len(roles), ", ".join(sorted(roles_hit)) or "—", ok, bad,
+               readiness), "",
+           "| Ngày | @sha | Vùng đã phủ | Role | Production | Cao | Vừa | Thấp | Tái phát | Xác minh sửa |",
+           "|---|---|---|---|---|---|---|---|---|---|"] + history[-9:] + [row, "",
            "## %s" % COVER_HEAD, "",
-           "`✓` đạt · `✗ #n` lỗi · `⛔` bị chặn đúng quyền · `·` chưa test · `—` không áp dụng", "",
-           "| Vùng | %s | %s |" % (" | ".join(roles), LAST), "|---|%s---|" % ("---|" * len(roles))] + table
+           "`✓` đạt · `✗ #n` lỗi · `⛔` bị chặn đúng quyền · `·` chưa test · `—` không áp dụng · Mức: Prototype · Beta · Production "
+           "(ux chấm vùng test lượt đó)", "",
+           "| Vùng | %s | %s | %s |" % (" | ".join(roles), LEVEL_HEAD, LAST), "|---|%s---|---|" % ("---|" * len(roles))] + table
     print("\n".join(out))
 
 
@@ -1337,6 +2021,9 @@ EFFORT = {"S": 0, "M": 1, "L": 2}
 FP = re.compile(r"^(qa|ux|arch|product)(/[a-z0-9][a-z0-9._-]*){2,}$")
 TARGET = re.compile(r"^(qa|ux|arch|product):F\d+$")
 REQUIRED = ("fp", "type", "sev", "effort", "evidence")
+READY = ("prototype", "beta")  # `- ready:` a finding that keeps its area from production, at that level
+READY_HEAD = "Mức sẵn sàng"
+CITE = re.compile(r"\b(?:qa|ux|arch|product):F\d+\b")
 BODY_MAX = 8000
 EXTEND_MAX = 2500  # an expert's view added to another finding: a section, not a second ticket
 
@@ -1375,6 +2062,8 @@ def parse_findings(path, platforms):
             problems.append("sev phải là cao | vừa | thấp")
         if meta.get("effort") and meta["effort"].upper() not in EFFORT:
             problems.append("effort phải là S | M | L")
+        if meta.get("ready") and meta["ready"].lower() not in READY:
+            problems.append("ready phải là prototype | beta")
         fp = meta.get("fp", "")
         if fp and not FP.match(fp):
             problems.append("fp `%s` phải là <lens>/<vùng>/<slug>, chữ thường, không số dòng" % fp)
@@ -1412,10 +2101,82 @@ def parse_findings(path, platforms):
         for key in ("regressed", "score"):
             if meta.get(key):
                 item[key] = meta[key]
+        if meta.get("ready"):
+            item["ready"] = meta["ready"].lower()
         out.append(item)
     if head and not heads:
         errors.append({"file": path, "error": "không có mục `## F<k>. <tiêu đề>` nào"})
-    return out, errors
+    return out, errors, grades_of(text, path, lens, errors)
+
+
+def grades_of(text, path, lens, errors):
+    """Rows of `## Mức sẵn sàng`: area · level · reason citing the findings that set it."""
+    header, rows = parse_table(section(text, READY_HEAD))
+    if not header:
+        return []
+    if lens != "ux":
+        errors.append({"file": path, "error": "chỉ ux chấm `## %s`" % READY_HEAD})
+        return []
+    out = []
+    for row in rows:
+        row = row + ["", "", ""]
+        level = next((lv for lv in LEVELS if lv.lower() == row[1].strip().lower()), None)
+        if not level:
+            errors.append({"file": path, "id": "ready:%s" % row[0], "error": "mức `%s` phải là %s" % (row[1], " | ".join(LEVELS))})
+            continue
+        out.append({"area": row[0], "level": level, "cites": CITE.findall(row[2]), "why": row[2], "file": path})
+    return out
+
+
+def stricter(a, b):
+    return "prototype" if "prototype" in (a, b) else (a or b)
+
+
+def resolve(cite, alias):
+    """A view → the finding it extends, a merged duplicate → the one kept."""
+    seen = set()
+    while cite in alias and cite not in seen:
+        seen.add(cite)
+        cite = alias[cite]
+    return cite
+
+
+def level_of(items):
+    """Prototype if a cited finding keeps the area a prototype, Beta if one blocks production (ready: beta, sev cao/vừa)."""
+    level = "Production"
+    for item in items:
+        if item.get("ready") == "prototype":
+            return "Prototype"
+        if item.get("ready") == "beta" or SEV[item["sev"]] <= 1:
+            level = "Beta"
+    return level
+
+
+def check_grades(grades, items, alias, errors):
+    by_id = {i["id"]: i for i in items}
+    out = []
+    for g in grades:
+        cited, missing = [], []
+        for cite in g["cites"]:
+            target = by_id.get(resolve(cite, alias))
+            if target:
+                cited.append(target)
+            else:
+                missing.append(cite)
+        where = {"file": g["file"], "id": "ready:%s" % g["area"]}
+        if missing:
+            errors.append(dict(where, error="dẫn %s: không có mục đó" % ", ".join(missing)))
+            continue
+        if g["level"] != "Production" and not cited:
+            errors.append(dict(where, error="mức %s phải dẫn ít nhất một mục (<lens>:F<k>)" % g["level"]))
+            continue
+        expect = level_of(cited)
+        if expect != g["level"]:
+            errors.append(dict(where, error="mức %s nhưng mục dẫn ra cho %s (ready prototype → Prototype; ready beta hoặc sev "
+                                            "cao/vừa → Beta; còn lại Production)" % (g["level"], expect)))
+            continue
+        out.append({"area": g["area"], "level": g["level"], "cites": sorted({i["id"] for i in cited})})
+    return out
 
 
 def score_of(item):
@@ -1440,6 +2201,8 @@ def join_panel(items, errors):
         if view["lens"] not in target["panel"]:
             target["panel"].append(view["lens"])
         target.setdefault("views", []).append(view["id"])
+        if view.get("ready"):
+            target["ready"] = stricter(target.get("ready"), view["ready"])
         for plat in view["platform"]:
             if plat not in target["platform"]:
                 target["platform"].append(plat)
@@ -1466,11 +2229,13 @@ def cmd_findings(a):
             platforms = list(afconfig.platform_labels(afconfig.load_config(root) or {}))
         except ValueError:
             platforms = []
-    items, errors = [], []
+    items, errors, grades = [], [], []
     for path in a.files:
-        found, bad = parse_findings(path, platforms)
+        found, bad, graded = parse_findings(path, platforms)
         items += found
         errors += bad
+        grades += graded
+    alias = {i["id"]: i["extends"] for i in items if "extends" in i}
     items = join_panel(items, errors)
     if a.body:
         hit = next((i for i in items if i["id"] == a.body), None)
@@ -1483,13 +2248,18 @@ def cmd_findings(a):
         kept = merged.get(item["fp"])
         if kept:
             kept.setdefault("also", []).append(item["id"])
+            alias[item["id"]] = kept["id"]
+            if item.get("ready"):
+                kept["ready"] = stricter(kept.get("ready"), item["ready"])
             continue
         merged[item["fp"]] = item
     ranked = sorted(merged.values(), key=rank)
+    ready = check_grades(grades, ranked, alias, errors)
     counts = collections.Counter(i["sev"] for i in ranked)
     roles = collections.Counter(r for i in ranked for r in i["roles"])
     emit({"count": len(ranked), "by_sev": dict(counts), "by_lens": dict(collections.Counter(i["lens"] for i in ranked)),
           "by_role": dict(roles), "panel": sum(1 for i in ranked if len(i.get("panel", [])) > 1),
+          "ready": ready, "by_level": dict(collections.Counter(g["level"] for g in ready)),
           "findings": [{k: v for k, v in i.items() if k != "body"} for i in ranked], "errors": errors}, 1 if errors else 0)
 
 
@@ -1506,6 +2276,10 @@ def main(argv=None):
     s = sub.add_parser("map", help="kiểm kê toàn sản phẩm: màn, endpoint, role, tài khoản test, vùng của bản đồ phủ")
     s.add_argument("--max-areas", type=int, default=250, help="số vùng tối đa của bản đồ phủ (mặc định 250)")
     s.add_argument("paths", nargs="*")
+    s = sub.add_parser("ready", help="mức sẵn sàng production: dấu vết prototype, design system, asset, nhận diện app, chữ, state")
+    s.add_argument("--map", help="JSON của `map`: thêm tín hiệu theo vùng")
+    s.add_argument("--top", type=int, default=8, help="số dòng tối đa mỗi danh sách")
+    s.add_argument("paths", nargs="*")
     s = sub.add_parser("plan", help="vùng nên test lượt này theo bản đồ phủ lần trước")
     s.add_argument("--map", required=True, help="JSON của `map`")
     s.add_argument("--prev", help="body issue checklist lần trước (có `## Bản đồ phủ`)")
@@ -1517,14 +2291,14 @@ def main(argv=None):
     s.add_argument("--run", help="bảng phủ của lượt này (qa viết); không có = lượt chỉ soát tĩnh")
     s.add_argument("--sha", required=True)
     s.add_argument("--prev")
-    s.add_argument("--index", help="JSON của `findings` (đếm mức độ, tái phát)")
+    s.add_argument("--index", help="JSON của `findings` (đếm mức độ, tái phát, mức sẵn sàng của vùng)")
     s.add_argument("--tickets", help="id phát hiện → ticket, vd qa:F1=#45,ux:F2=#46")
     s.add_argument("--date")
     s = sub.add_parser("findings", help="kiểm + gộp file phát hiện của auditor")
     s.add_argument("files", nargs="+")
     s.add_argument("--body", help="in body ticket của một mục, vd qa:F2")
     a = p.parse_args(argv)
-    {"scan": cmd_scan, "flows": cmd_flows, "map": cmd_map, "plan": cmd_plan, "ledger": cmd_ledger, "findings": cmd_findings}[a.cmd](a)
+    {"scan": cmd_scan, "flows": cmd_flows, "map": cmd_map, "ready": cmd_ready, "plan": cmd_plan, "ledger": cmd_ledger, "findings": cmd_findings}[a.cmd](a)
 
 
 if __name__ == "__main__":

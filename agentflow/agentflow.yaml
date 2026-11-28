@@ -100,6 +100,11 @@ clarify:
   implement: ask               # trước khi DEV code — auto: SA tự chọn giải pháp · ask: SA đưa phương án ([AF:SA] options), người chọn + xác nhận
                                # "Sẽ thực hiện" (/do hỏi trong terminal, /run hỏi qua GitHub với label needs_info)
 
+# ── CHECKLIST (tuỳ chọn) ─────────────────────────────────────────────────────
+audit:
+  benchmarks: []               # app/web cùng lĩnh vực làm mốc "đạt production" cho /agentflow:checklist, vd ["Tên app", "https://…"].
+                               # Trống ⇒ ux tự tìm bằng từ khoá lĩnh vực chung (không gửi tên sản phẩm, code). Mục từ mốc này chỉ là Improvement
+
 # ── NGƯỜI (GitHub login, để @mention) ────────────────────────────────────────
 people:
   po: []

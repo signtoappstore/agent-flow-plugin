@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -999,11 +1000,11 @@ class AuditMap(RepoCase):
         index = self.save("index.json", json.dumps({"by_sev": {"cao": 1, "vừa": 2}, "findings": [{"regressed": "#13"}]}))
         md = self.audit("ledger", "--map", amap, "--prev", prev, "--run", run, "--index", index, "--sha", "b" * 40,
                         "--tickets", "qa:F1=#45", "--date", "2026-11-27")
-        self.assertIn("| web /orders/:orderId | ✓ | ✗ #45 | ⛔ | @bbbbbbb 2026-11-27 |", md)
-        self.assertIn("| web / | ✓ | · | · | @aaaaaaa 2026-11-01 |", md)  # untouched this run: kept
+        self.assertIn("| web /orders/:orderId | ✓ | ✗ #45 | ⛔ | · | @bbbbbbb 2026-11-27 |", md)
+        self.assertIn("| web / | ✓ | · | · | · | @aaaaaaa 2026-11-01 |", md)  # untouched this run: kept
         self.assertNotIn("/gone", md)  # no longer in the product
-        self.assertIn("| 2026-11-01 | @aaaaaaa |", md)
-        self.assertRegex(md, r"\| 2026-11-27 \| @bbbbbbb \| 2/\d+ \(\d+%\) \| 3/3 \| 1 \| 2 \| 0 \| 1 \| 1/2 \|")
+        self.assertIn("| 2026-11-01 | @aaaaaaa | 1/9 (11%) | 1/2 | — | 2 |", md)  # a run before readiness: its column padded
+        self.assertRegex(md, r"\| 2026-11-27 \| @bbbbbbb \| 2/\d+ \(\d+%\) \| 3/3 \| — \| 1 \| 2 \| 0 \| 1 \| 1/2 \|")
         self.assertIn("Phủ vùng 1/", md)
         self.assertLess(md.index("## Sức khoẻ"), md.index("## Bản đồ phủ"))
         again = self.save("again.md", md)
@@ -1049,6 +1050,271 @@ class AuditPanel(RepoCase):
         self.write("out/qa2.md", "# audit qa · o/r\n\n## F1. x\n- extends: qa:F2\n- evidence: y\n\n### Góc nhìn\nz\n")
         out = json.loads(self.audit("findings", "out/qa2.md", code=1))
         self.assertIn("lăng kính khác", out["errors"][0]["error"])
+
+
+def png(width, height, pad=0):
+    """A PNG header the size reader understands, padded to weigh `pad` bytes more."""
+    return (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height) + b"\x08\x06\x00\x00\x00"
+            + b"\0" * (4 + pad))
+
+
+READY_CONFIG = """schema: 5
+surfaces:
+  web:
+    path: "web/"
+  mobile:
+    path: "mobile/"
+forbidden: ["web/src/secret/**"]
+"""
+READY_FILES = {
+    "agentflow.yaml": READY_CONFIG,
+    "web/package.json": '{"dependencies": {"vite": "5.0.0", "react": "18.3.1", "lucide-react": "0.400.0", "react-icons": "5.0.0", '
+                        '"@sentry/react": "8.0.0"}}\n',
+    "web/index.html": '<html><head><link rel="icon" href="/vite.svg" /><title>Vite + React</title></head></html>\n',
+    "web/public/vite.svg": "<svg/>\n",
+    "web/src/theme/colors.ts": "export const colors = { primary: '#0a84ff', danger: '#ff3b30' }\n",
+    "web/src/i18n/vi.json": '{"home": "Trang chủ"}\n',
+    "web/src/main.tsx": "import Home from './pages/home'\nexport const routes = <Route path=\"/home\" element={<Home />} />\n",
+    "web/src/pages/home.tsx": "import { Search } from 'lucide-react'\n"
+                              "import { FaUser } from 'react-icons/fa'\n"
+                              "import hero from '../assets/hero.png'\n"
+                              "import gone from '../assets/gone.png'\n"
+                              "import { Card } from '../components/card'\n"
+                              "export default function Home() {\n"
+                              "  const { data } = useQuery(['feed'], load)\n"
+                              "  return <div style={{ color: '#ff0000', padding: 10 }}>\n"
+                              "    <p>Lorem ipsum dolor sit amet</p>\n"
+                              "    <button onClick={() => {}}>Đăng nhập</button>\n"
+                              "    <span>Something went wrong, try again</span>\n"
+                              "    <img src=\"https://picsum.photos/200\" /> <i>🔥</i>\n"
+                              "    {data.map((x) => <Card key={x.id} />)}\n"
+                              "    <p>{error.message}</p> <img src={hero} /> <img src={gone} /> <Search /> <FaUser />\n"
+                              "  </div>\n}\n",
+    "web/src/components/card.tsx": "export const Card = () => <div className=\"bg-[#123abc] p-[13px]\">Coming soon</div>\n",
+    "web/src/secret/keys.tsx": "export const K = () => <p>Lorem ipsum</p>\n",
+    "mobile/pubspec.yaml": "name: app\nflutter:\n  assets:\n    - assets/images/\n",
+    "mobile/lib/pages/profile.dart": "class ProfilePage extends StatelessWidget {\n"
+                                     "  Widget build(BuildContext context) {\n"
+                                     "    return Column(children: [\n"
+                                     "      Image.asset('assets/images/logo.png'),\n"
+                                     "      Image.asset('assets/images/gone.png'),\n"
+                                     "      Icon(Icons.add), Icon(CupertinoIcons.add),\n"
+                                     "      Container(color: Colors.red, padding: EdgeInsets.all(Spacing.x3)),\n"
+                                     "      Container(color: const Color(0xFF123456), padding: EdgeInsets.all(10)),\n"
+                                     "      TextButton(onPressed: () {}, child: Text('Sắp ra mắt')),\n"
+                                     "    ]);\n  }\n}\n",
+    "mobile/android/app/src/main/AndroidManifest.xml": '<manifest><application android:label="my_app" android:icon="@mipmap/ic_launcher">'
+                                                       '<intent-filter android:label="flutter_web_auth_2"/></application></manifest>\n',
+    "mobile/ios/Runner.xcodeproj/project.pbxproj": "// project\n",
+    "mobile/ios/Runner/Assets.xcassets/AppIcon.appiconset/Contents.json":
+        '{"images": [{"size": "60x60", "scale": "2x", "filename": "a.png"}, {"size": "1024x1024", "scale": "1x"}]}\n',
+}
+READY_IMAGES = {
+    "web/src/assets/hero.png": png(1600, 900, 400 * 1024),
+    "web/src/assets/unused-banner.png": png(800, 200),
+    "web/src/assets/icons/ic_star.png": png(24, 24),
+    "mobile/assets/images/logo.png": png(100, 100),
+    "mobile/assets/images/2.0x/logo.png": png(200, 200),
+    "mobile/android/app/src/main/res/mipmap-hdpi/ic_launcher.png": png(72, 72),
+    "mobile/ios/Runner/Assets.xcassets/AppIcon.appiconset/a.png": png(120, 120),
+}
+
+
+class AuditReady(RepoCase):
+    """agentflow-audit ready: what still makes the product look like a prototype, counted where ux should look."""
+
+    write = Style.write
+
+    def setUp(self):
+        super().setUp()
+        for rel, text in READY_FILES.items():
+            self.write(rel, text)
+        for rel, data in READY_IMAGES.items():
+            os.makedirs(os.path.dirname(os.path.join(self.repo, rel)), exist_ok=True)
+            with open(os.path.join(self.repo, rel), "wb") as fh:
+                fh.write(data)
+        Style.git(self, "add", "-A")
+        Style.git(self, "commit", "-q", "-m", "base")
+
+    def audit(self, *args, code=0):
+        res = tool("agentflow-audit", *args, cwd=self.repo)
+        self.assertEqual(res.returncode, code, res.stdout + res.stderr)
+        return res.stdout
+
+    def test_prototype_traces_a_user_sees(self):
+        out = json.loads(self.audit("ready"))
+        proto = out["prototype"]
+        self.assertEqual(proto["lorem"]["at"], ["web/src/pages/home.tsx:9"])  # the forbidden folder is never read
+        self.assertEqual(proto["coming_soon"]["count"], 2)  # English and Vietnamese
+        self.assertEqual(proto["placeholder_image"]["at"], ["web/src/pages/home.tsx:12"])
+        self.assertEqual(proto["dead_handler"]["files"], 2)  # onClick={() => {}} and onPressed: () {}
+        self.assertEqual(proto["raw_error"]["at"], ["web/src/pages/home.tsx:14"])
+        self.assertEqual(sorted(proto["default_title"]["at"]), ["mobile/android/app/src/main/AndroidManifest.xml:1", "web/index.html:1"])
+        self.assertEqual(proto["template_leftovers"], [{"path": "web/public/vite.svg", "used": True}])
+        self.assertNotIn("Lorem", json.dumps(out["prototype"].get("todo_text", {})))
+
+    def test_design_system_drift_outside_the_token_files(self):
+        ds = json.loads(self.audit("ready"))["design_system"]
+        self.assertEqual(ds["token_files"], ["web/src/theme/colors.ts"])
+        self.assertEqual(ds["hardcoded"]["hex"]["at"], ["web/src/pages/home.tsx:8"])  # the tokens' own hex do not count
+        self.assertEqual(ds["hardcoded"]["arbitrary_value"]["at"], ["web/src/components/card.tsx:1"])  # one hit a line
+        self.assertEqual(ds["hardcoded"]["default_palette"]["at"], ["mobile/lib/pages/profile.dart:7"])
+        self.assertEqual(ds["hardcoded"]["color_literal"]["count"], 1)
+        self.assertEqual(ds["hardcoded"]["off_grid"]["count"], 2)  # padding: 10 and EdgeInsets.all(10), not Spacing.x3
+        self.assertEqual(ds["icon_mixed"], {"mobile (dart)": ["cupertino", "material"], "web (js)": ["lucide", "react-icons/fa"]})
+        self.assertEqual(ds["emoji"]["count"], 1)
+
+    def test_assets_identity_copy_states_and_ops(self):
+        out = json.loads(self.audit("ready"))
+        assets = out["assets"]
+        self.assertEqual(assets["heavy"][0]["path"], "web/src/assets/hero.png")
+        self.assertEqual(assets["heavy"][0]["px"], "1600x900")
+        self.assertEqual(assets["raster_icons"]["at"], ["web/src/assets/icons/ic_star.png"])
+        gaps = {g["asset"]: g["missing"] for g in assets["density_gaps"]["top"]}
+        self.assertEqual(gaps["mobile/assets/images/logo.png"], ["3.0x"])
+        self.assertEqual(gaps["mobile/android/app/src/main/res/mipmap/ic_launcher"], ["mdpi", "xhdpi", "xxhdpi", "xxxhdpi"])
+        self.assertIn("web/src/assets/unused-banner.png", assets["unused"]["top"])
+        self.assertNotIn("web/src/assets/hero.png", assets["unused"]["top"])
+        self.assertEqual(sorted(m["ref"] for m in assets["missing"]), ["../assets/gone.png", "assets/images/gone.png"])
+        identity = out["identity"]
+        self.assertIn("app icon 1024×1024 (App Store)", identity["ios"]["missing"])
+        self.assertIn("launch screen", identity["ios"]["missing"])
+        self.assertIn("adaptive icon (mipmap-anydpi-v26)", identity["android"]["missing"])
+        self.assertEqual(identity["web"]["missing"], ["apple-touch-icon", "web manifest (icon 192/512)", "ảnh chia sẻ (og:image)"])
+        self.assertFalse(out["fonts"]["custom"])
+        self.assertTrue(out["copy"]["l10n"])
+        self.assertEqual(out["copy"]["mixed_lang"]["en"], 1)
+        self.assertIn("web/src/pages/home.tsx", out["states"]["no_loading"])
+        self.assertIn("web/src/pages/home.tsx", out["states"]["no_empty"])
+        self.assertEqual(out["ops"]["crash_reporting"], ["sentry"])
+        self.assertEqual(out["ops"]["tracking"], [])
+
+    def test_signals_of_each_area_follow_the_screens_imports(self):
+        amap = os.path.join(self.repo, "map.json")
+        with open(amap, "w", encoding="utf-8") as fh:
+            fh.write(self.audit("map"))
+        areas = {a["area"]: a for a in json.loads(self.audit("ready", "--map", amap))["areas"]}
+        home = next(a for name, a in areas.items() if name.endswith("/home"))
+        self.assertEqual(home["signals"]["coming_soon"], 1)  # from the card it imports
+        self.assertEqual(home["signals"]["lorem"], 1)
+        self.assertEqual(home["files"], 3)  # main.tsx → pages/home.tsx → components/card.tsx
+
+
+READY_QA = """# audit qa · o/r @abc1234 · 2026-11-28
+
+## F1. Nút Xuất báo cáo không làm gì
+- fp: qa/reports/export-dead
+- type: Bug
+- sev: vừa
+- effort: S
+- evidence: audit-reports-admin-default.png
+
+### Tiêu chí nghiệm thu
+- [ ] Bấm Xuất tải về file CSV
+"""
+READY_UX = """# audit ux · o/r @abc1234 · 2026-11-28
+
+## F1. Góc nhìn: nút chết là dấu vết prototype
+- extends: qa:F1
+- ready: prototype
+- evidence: ready.json prototype.dead_handler
+
+### Góc nhìn UI/UX
+Nút chính của màn không làm gì: chưa đạt production.
+
+## F2. Thay emoji bằng icon của bộ đang dùng ở 3 màn
+- fp: ux/profile/emoji-icons
+- type: Improvement
+- sev: thấp
+- effort: S
+- evidence: audit-profile-member-default.png
+
+### Tiêu chí nghiệm thu
+- [ ] Không còn emoji làm icon
+
+## F3. Ảnh hero mờ trên màn chủ
+- fp: ux/home/hero-blurry
+- type: Bug
+- sev: vừa
+- ready: beta
+- effort: S
+- evidence: audit-home-guest-default.png
+
+### Tiêu chí nghiệm thu
+- [ ] Ảnh hero có bản @2x, @3x
+
+## Mức sẵn sàng
+| Vùng | Mức | Lý do |
+|---|---|---|
+| web /reports | Prototype | ux:F1 — nút Xuất chưa nối |
+| web /home | Beta | ux:F3 |
+| web /profile | Production | ux:F2 chỉ đánh bóng |
+| web /orders | Production | — |
+| web /settings | Beta | không dẫn mục |
+| web /cart | Production | ux:F3 |
+"""
+
+
+class AuditReadiness(RepoCase):
+    """findings + ledger: ux grades each tested area Prototype · Beta · Production, and the grade follows its findings."""
+
+    write = Style.write
+
+    def setUp(self):
+        super().setUp()
+        self.write("agentflow.yaml", AUDIT_CONFIG)
+        self.write("out/qa.md", READY_QA)
+        self.write("out/ux.md", READY_UX)
+
+    def audit(self, *args, code=0):
+        res = tool("agentflow-audit", *args, cwd=self.repo)
+        self.assertEqual(res.returncode, code, res.stdout + res.stderr)
+        return res
+
+    def test_grades_must_match_the_findings_they_cite(self):
+        out = json.loads(self.audit("findings", "out/qa.md", "out/ux.md", code=1).stdout)
+        self.assertEqual(next(f for f in out["findings"] if f["id"] == "qa:F1")["ready"], "prototype")  # the view marked it
+        self.assertEqual({g["area"]: g["level"] for g in out["ready"]},
+                         {"web /reports": "Prototype", "web /home": "Beta", "web /profile": "Production", "web /orders": "Production"})
+        self.assertEqual(out["ready"][0]["cites"], ["qa:F1"])  # a view stands for the finding it extends
+        self.assertEqual(out["by_level"], {"Prototype": 1, "Beta": 1, "Production": 2})
+        errors = {e["id"]: e["error"] for e in out["errors"]}
+        self.assertIn("phải dẫn ít nhất một mục", errors["ready:web /settings"])
+        self.assertIn("mức Production nhưng mục dẫn ra cho Beta", errors["ready:web /cart"])
+
+    def test_only_ux_grades(self):
+        self.write("out/arch.md", "# audit arch · o/r\n\n## F1. x\n- extends: qa:F1\n- evidence: y\n\n### Góc nhìn\nz\n\n"
+                                  "## Mức sẵn sàng\n| Vùng | Mức | Lý do |\n|---|---|---|\n| web /a | Beta | qa:F1 |\n")
+        out = json.loads(self.audit("findings", "out/qa.md", "out/arch.md", code=1).stdout)
+        self.assertIn("chỉ ux chấm", out["errors"][0]["error"])
+        self.assertEqual(out["ready"], [])
+
+    def test_ledger_keeps_levels_of_tested_areas_across_runs(self):
+        self.write("out/map.json", json.dumps({"areas": [{"area": a, "kind": "ui"} for a in
+                                                         ("web /reports", "web /home", "web /profile", "web /orders", "web /old")],
+                                               "roles": [{"role": "admin"}]}))
+        self.write("out/prev.md", "## Bản đồ phủ\n\n| Vùng | admin | Mức | Lần cuối |\n|---|---|---|---|\n"
+                                  "| web /old | ✓ | Beta | @aaaaaaa 2026-11-01 |\n| web /home | ✓ | Prototype | @aaaaaaa 2026-11-01 |\n")
+        self.write("out/run.md", "## Bản đồ phủ\n\n| Vùng | admin |\n|---|---|\n| web /reports | ✗ qa:F1 |\n| web /home | ✓ |\n"
+                                 "| web /profile | ✓ |\n")
+        self.write("out/index.json", json.dumps({"ready": [{"area": "web /reports", "level": "Prototype"}, {"area": "web /home", "level": "Beta"},
+                                                           {"area": "web /profile", "level": "Production"},
+                                                           {"area": "web /orders", "level": "Production"}]}))
+        res = self.audit("ledger", "--map", "out/map.json", "--prev", "out/prev.md", "--run", "out/run.md", "--index", "out/index.json",
+                         "--sha", "b" * 40, "--date", "2026-11-28")
+        md = res.stdout
+        self.assertIn("| web /reports | ✗ qa:F1 | Prototype | @bbbbbbb 2026-11-28 |", md)
+        self.assertIn("| web /home | ✓ | Beta | @bbbbbbb 2026-11-28 |", md)  # tested again: the new grade
+        self.assertIn("| web /old | ✓ | Beta | @aaaaaaa 2026-11-01 |", md)  # not tested: its grade kept
+        self.assertIn("| web /orders | · | · | — |", md)  # graded without a test this run: ignored
+        self.assertIn("web /orders", res.stderr)
+        self.assertIn("mức 1 Production · 2 Beta · 1 Prototype / 4 vùng đã chấm", md)
+        self.assertRegex(md, r"\| 2026-11-28 \| @bbbbbbb \| \d/5 \(\d+%\) \| 1/1 \| 1/4 \|")
+        plan = os.path.join(self.repo, "out/again.md")
+        with open(plan, "w", encoding="utf-8") as fh:
+            fh.write(md)
+        out = json.loads(self.audit("plan", "--map", "out/map.json", "--prev", plan, "--max", "0").stdout)
+        self.assertEqual({s["area"]: s["level"] for s in out["selected"]}["web /reports"], "Prototype")
 
 
 class Base(unittest.TestCase):
